@@ -2,7 +2,7 @@
 
 
 
-cd $HOME/DIJA/run_harmbench
+cd /workspace/DIJA/run_harmbench
 
 
 

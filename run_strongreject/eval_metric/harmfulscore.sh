@@ -1,15 +1,15 @@
 #!/bin/bash
 
 
-cd $HOME/DIJA/run_strongreject/eval_metric/
+cd /workspace/DIJA/run_strongreject/eval_metric/
 
 model_name=$1 # victim model--dLLMs
 attack_method=$2
 defense_method=$3
 version=$4
 
-INPUT_FILE="$HOME/DIJA/run_strongreject/eval_results/eval_results_${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
-OUTPUT_FILE="$HOME/DIJA/run_strongreject/eval_results/harmfulness_score/${model_name}_${attack_method}_${defense_method}_${version}.json"
+INPUT_FILE="/workspace/DIJA/run_strongreject/eval_results/eval_results_${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
+OUTPUT_FILE="/workspace/DIJA/run_strongreject/eval_results/harmfulness_score/${model_name}_${attack_method}_${defense_method}_${version}.json"
 JUDGE_MODEL="gpt-4o"
 POLICY_MODEL="gpt-4o"
 NUM_PROCESSES=100

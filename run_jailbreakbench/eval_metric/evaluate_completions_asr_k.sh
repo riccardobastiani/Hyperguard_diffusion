@@ -2,7 +2,7 @@
 
 
 
-cd $HOME/DIJA/run_jailbreakbench
+cd /workspace/DIJA/run_jailbreakbench
 
 
 model_name=$1

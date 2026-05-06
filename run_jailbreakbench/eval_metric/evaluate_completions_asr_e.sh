@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd $HOME/DIJA/run_jailbreakbench
+cd /workspace/DIJA/run_jailbreakbench
 
 jailbreak_model_name=$1
 attack_mathod=$2

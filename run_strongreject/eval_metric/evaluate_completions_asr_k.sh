@@ -2,7 +2,7 @@
 
 
 
-cd $HOME/DIJA/run_strongreject
+cd /workspace/DIJA/run_strongreject
 
 
 model_name=$1
