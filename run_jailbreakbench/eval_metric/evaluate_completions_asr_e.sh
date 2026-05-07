@@ -1,6 +1,6 @@
 #!/bin/bash
 
-cd /workspace/DIJA/run_jailbreakbench
+cd /workspace/Hyperguard_diffusion/run_jailbreakbench
 
 jailbreak_model_name=$1
 attack_mathod=$2

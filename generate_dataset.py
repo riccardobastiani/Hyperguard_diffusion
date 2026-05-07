@@ -16,20 +16,25 @@ def process_jailbreaks(input_file, file_output_json, file_output_csv):
     
     successful_jailbreaks = []
 
-    # Itera attraverso le chiavi (BehaviorID) del dizionario
-    for behavior_id, results in data.items():
-        for entry in results:
-            # Filtra solo quelli dove asr_e_label è uguale a 1
-            if entry.get('asr_e_label') == 1:
-                # Logica di fallback: usa 'generation', se manca usa 'response'
-                response_text = entry.get('generation') or entry.get('response', '')
-                
-                record = {
-                    'Behavior': entry.get('Behavior', ''),
-                    'Refined_behavior': entry.get('Refined_behavior', ''),
-                    'Response': response_text
-                }
-                successful_jailbreaks.append(record)
+    # Support both dict-of-lists (HarmBench) and flat list (StrongREJECT) formats
+    if isinstance(data, dict):
+        entries = [entry for results in data.values() for entry in results]
+    else:
+        entries = data
+
+    for entry in entries:
+        # Filtra solo quelli dove asr_e_label >= 0.5 (float) o == 1 (int)
+        asr_e = entry.get('asr_e_label', 0)
+        if asr_e == 1 or (isinstance(asr_e, float) and asr_e >= 0.5):
+            # Logica di fallback: usa 'generation', se manca usa 'response'
+            response_text = entry.get('generation') or entry.get('response', '')
+
+            record = {
+                'Behavior': entry.get('Behavior') or entry.get('vanilla prompt', ''),
+                'Refined_behavior': entry.get('Refined_behavior') or entry.get('refine prompt', ''),
+                'Response': response_text
+            }
+            successful_jailbreaks.append(record)
 
     # --- Salvataggio in JSON ---
     with open(file_output_json, 'w', encoding='utf-8') as f_json:

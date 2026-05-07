@@ -36,7 +36,9 @@ anyio==4.9.0
     #   httpx
     #   openai
 async-timeout==5.0.1
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   aiohttp
 attrs==25.3.0
     # via
     #   -r requirements.in
@@ -173,7 +175,11 @@ et-xmlfile==2.0.0
 evaluate==0.4.3
     # via -r requirements.in
 exceptiongroup==1.3.0
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   anyio
+    #   hypothesis
+    #   pytest
 factualscenegraph==0.6.1
     # via
     #   -r requirements.in
@@ -474,7 +480,7 @@ nodeenv==1.9.1
     #   pre-commit
 numexpr==2.10.2
     # via -r requirements.in
-numpy==2.4.4
+numpy==2.2.6
     # via
     #   -r requirements.in
     #   accelerate
@@ -854,7 +860,6 @@ setuptools==82.0.1
     #   pytablewriter
     #   spacy
     #   thinc
-    #   torch
     #   wandb
 shellingham==1.5.4
     # via
@@ -948,7 +953,11 @@ tokenizers==0.21.1
     #   litellm
     #   transformers
 tomli==2.2.1
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   black
+    #   mypy
+    #   pytest
 toolz==1.0.0
     # via
     #   -r requirements.in
@@ -1015,14 +1024,18 @@ typing-extensions==4.13.2
     #   -r requirements.in
     #   anthropic
     #   anyio
+    #   black
+    #   cloudpathlib
     #   exceptiongroup
     #   google-generativeai
     #   huggingface-hub
+    #   multidict
     #   mypy
     #   openai
     #   pydantic
     #   pydantic-core
     #   referencing
+    #   rich
     #   sentence-transformers
     #   torch
     #   typer

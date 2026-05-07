@@ -2,7 +2,7 @@
 
 
 
-cd /workspace/DIJA/run_strongreject
+cd /workspace/Hyperguard_diffusion/run_strongreject
 
 
 model_name=$1

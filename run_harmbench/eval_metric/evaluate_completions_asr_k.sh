@@ -2,7 +2,7 @@
 
 
 
-cd /workspace/DIJA/run_harmbench
+cd /workspace/Hyperguard_diffusion/run_harmbench
 
 
 

@@ -2,7 +2,7 @@
 
 
 
-cd /workspace/DIJA/run_jailbreakbench
+cd /workspace/Hyperguard_diffusion/run_jailbreakbench
 
 
 model_name=$1

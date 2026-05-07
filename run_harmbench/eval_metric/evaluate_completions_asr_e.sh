@@ -11,7 +11,7 @@ model_name=$1
 attack_method=$2
 defense_method=$3
 
-cls_path="/workspace/DIJA/hf_models/HarmBench-Mistral-7b-val-cls"
+cls_path="/workspace/Hyperguard_diffusion/hf_models/HarmBench-Mistral-7b-val-cls"
 behaviors_path="/mnt/petrelfs/wenzichen/diffusion_lm/llada_safety/HarmBench/data/behavior_datasets/harmbench_behaviors_text_all_refined_v3.csv"
 completions_path="/mnt/petrelfs/wenzichen/diffusion_lm/llada_safety/HarmBench/data/generated_completions_${model_name}_${attack_method}_attack_${defense_method}_v3.json"
 save_path="./results/eval_results_${model_name}_${attack_method}_attack_${defense_method}_v3.json"

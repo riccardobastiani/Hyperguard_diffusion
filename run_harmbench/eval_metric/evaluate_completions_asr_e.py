@@ -12,7 +12,7 @@ transformers.utils.logging.set_verbosity_error()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Running red teaming evaluation with Llama Guard 3.")
-    parser.add_argument("--cls_path", type=str, default='/workspace/DIJA/hf_models/Llama-Guard-3-8B')
+    parser.add_argument("--cls_path", type=str, default='/workspace/Hyperguard_diffusion/hf_models/Llama-Guard-3-8B')
     parser.add_argument("--completions_path", type=str, required=True)
     parser.add_argument("--save_path", type=str, required=True)
     parser.add_argument("--num_tokens", type=int, default=512)
