@@ -147,7 +147,7 @@ class Llama3Classifier_locally:
         """
         model_name = model_path if model_path else self.MODEL_NAME
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name).to(self.DEVICE).eval()
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(self.DEVICE).eval()
 
     def _build_classifier_input(self, goal: str, response: str) -> str:
         return self.USER_PROMPT.format(goal=goal, response=response)

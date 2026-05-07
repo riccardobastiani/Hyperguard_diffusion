@@ -117,6 +117,7 @@ Haoyun Xu<sup>1</sup>,
 
   # Jailbreak attack and evaluation
   bash eval_jailbreakbench.sh DIJA [Defense_method] [Victim_model] [Version]
+  bash eval_jailbreakbench.sh DIJA none llada_instruct v1
 ```
 
 ### StrongREJECT evaluation

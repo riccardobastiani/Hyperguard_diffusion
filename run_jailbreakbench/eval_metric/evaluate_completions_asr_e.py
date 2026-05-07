@@ -6,7 +6,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from benchmarks.jailbreakbench.src.jailbreakbench.classifier import Llama3JailbreakJudge
+from benchmarks.jailbreakbench.src.jailbreakbench.classifier import Llama3JailbreakJudge, Llama3JailbreakJudge_locally
 
 
 def load_data(file_path):
@@ -26,8 +26,11 @@ def extract_prompts_and_responses(data):
     return prompts, responses
 
 
-def classify_jailbreaks(prompts, responses, api_key):
-    classifier = Llama3JailbreakJudge(api_key)
+def classify_jailbreaks(prompts, responses, api_key=None, model_path=None, local=False):
+    if local:
+        classifier = Llama3JailbreakJudge_locally(model_path=model_path)
+    else:
+        classifier = Llama3JailbreakJudge(api_key)
     return classifier.classify_responses(prompts, responses)
 
 
@@ -42,7 +45,7 @@ def main(args):
 
     # Classify jailbreak responses
     print("Classifying jailbreak responses...")
-    classifications = classify_jailbreaks(prompts, responses, args.api_key)
+    classifications = classify_jailbreaks(prompts, responses, api_key=args.api_key, model_path=args.model_path, local=args.local)
 
     # Output results
     num_jailbroken = sum(classifications)
@@ -70,7 +73,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--api-key", "-a",
         type=str,
-        required=True
+        default=None
+    )
+
+    parser.add_argument(
+        "--model-path", "-m",
+        type=str,
+        default=None,
+        help="Path to a local HuggingFace model to use as judge instead of the Together API"
+    )
+
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Use a local model for classification instead of the Together API"
     )
 
     parser.add_argument(

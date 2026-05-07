@@ -1,5 +1,6 @@
 import json
 import csv
+import os
 import argparse
 
 def parse_args():
@@ -23,20 +24,20 @@ def process_jailbreaks(input_file, file_output_json, file_output_csv):
         entries = data
 
     for entry in entries:
-        # Filtra solo quelli dove asr_e_label >= 0.5 (float) o == 1 (int)
+        # Support bool (true/false), int (1/0), and float (>=0.5)
         asr_e = entry.get('asr_e_label', 0)
-        if asr_e == 1 or (isinstance(asr_e, float) and asr_e >= 0.5):
-            # Logica di fallback: usa 'generation', se manca usa 'response'
+        if asr_e is True or asr_e == 1 or (isinstance(asr_e, float) and asr_e >= 0.5):
             response_text = entry.get('generation') or entry.get('response', '')
 
             record = {
-                'Behavior': entry.get('Behavior') or entry.get('vanilla prompt', ''),
-                'Refined_behavior': entry.get('Refined_behavior') or entry.get('refine prompt', ''),
+                'Behavior': entry.get('Behavior') or entry.get('behavior') or entry.get('goal') or entry.get('vanilla prompt', ''),
+                'Refined_behavior': entry.get('Refined_behavior') or entry.get('refined goal') or entry.get('refine prompt', ''),
                 'Response': response_text
             }
             successful_jailbreaks.append(record)
 
     # --- Salvataggio in JSON ---
+    os.makedirs(os.path.dirname(file_output_json), exist_ok=True)
     with open(file_output_json, 'w', encoding='utf-8') as f_json:
         json.dump(successful_jailbreaks, f_json, indent=4, ensure_ascii=False)
     print(f"File JSON creato con successo: {file_output_json} ({len(successful_jailbreaks)} record)")

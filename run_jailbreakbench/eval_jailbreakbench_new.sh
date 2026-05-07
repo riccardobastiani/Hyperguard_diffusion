@@ -10,13 +10,15 @@ attack_method=$1
 defense_method=$2
 model_name=$3
 version=$4
-together_api_key=""  # TODO: set your Together API key here
+together_api_key=""  # TODO: set your Together API key here (used only if not using local judge)
+judge_model_path="/workspace/Hyperguard_diffusion/hf_models/Meta-Llama-3-8B-Instruct"  # TODO: set path to local judge model
+use_local_judge=true  # Set to false to use Together API instead
 
 API_KEY="" # TODO: Set your OpenAI API key here
 BASE_URL="" # TODO: Set your OpenAI API base URL here if needed
 
-# Automatically select an idle GPU
-export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{if ($1 == 0) print NR-1}' | head -n 1)
+# Automatically select the GPU with the least memory used
+export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk 'BEGIN{min=999999; idx=0} {if ($1 < min) {min=$1; idx=NR-1}} END{print idx}')
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # Navigate to working directory
@@ -88,17 +90,35 @@ attack_prompt="/workspace/Hyperguard_diffusion/run_jailbreakbench/refine_prompt/
 output_json="/workspace/Hyperguard_diffusion/run_jailbreakbench/attack_results/${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
 
 
-# TODO: Run the jailbreak attack
-echo "Running model inference with ${python_script}..."
-python ${python_script} \
-  --model_path "${model_path}" \
-  --attack_prompt "${attack_prompt}" \
-  --output_json "${output_json}" \
-  --steps ${steps} \
-  --gen_length ${gen_length} \
-  --mask_id ${mask_id} \
-  --mask_counts ${mask_counts} \
-  --attack_method "${attack_method}" \
-  --defense_method "${defense_method}"
+save_path="/workspace/Hyperguard_diffusion/run_jailbreakbench/eval_results/eval_results_${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
+
+# Run ASR-e evaluation
+echo "Running JailbreakBench ASR-e..."
+if [ "$use_local_judge" = true ]; then
+    python eval_metric/evaluate_completions_asr_e.py \
+        --data-path "${output_json}" \
+        --local \
+        --model-path "${judge_model_path}" \
+        --output-path "${save_path}"
+else
+    python eval_metric/evaluate_completions_asr_e.py \
+        --data-path "${output_json}" \
+        --api-key "${together_api_key}" \
+        --output-path "${save_path}"
+fi
+
+
+# Run ASR-k evaluation
+echo "Running JailbreakBench ASR-k..."
+# Use ASR-e output if available, otherwise fall back to raw attack results
+if [ -f "${save_path}" ]; then
+    asr_k_input="${save_path}"
+else
+    echo "ASR-e output not found, running ASR-k on raw attack results instead."
+    asr_k_input="${output_json}"
+fi
+python eval_metric/evaluate_completions_asr_k.py \
+    --json_path "${asr_k_input}" \
+
 
 echo "All steps completed successfully."
