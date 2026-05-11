@@ -85,6 +85,34 @@ The system is evaluated using:
 
 ---
 
+## Layer-Wise Probing Analysis
+
+This repo includes a probing pipeline for measuring which LLaDA transformer
+layer best separates safe and unsafe prompts at denoising step 10 of 64.
+
+Run:
+
+```bash
+python probe_analysis.py --samples-per-class 50 --batch-size 1 --device auto
+```
+
+The script loads:
+
+- safe prompts from `tatsu-lab/alpaca` using `instruction` plus `input`
+- unsafe prompts from `saralazza/llada-safety-dataset` using `refined_behavior`
+
+It writes the analysis artifacts to `probe_outputs/`:
+
+- `layer_separability_scores.json`
+- `layer_score_plot.png`
+- `best_layer_pca.png`
+
+The generation hook is implemented in `generate.py` as
+`generate_with_layer_probes(...)`. Normal `generate(...)` remains available for
+standard LLaDA inference.
+
+---
+
 ## Conceptual Contribution
 
 Unlike traditional safety systems that rely on:
