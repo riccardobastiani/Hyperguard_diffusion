@@ -11,8 +11,8 @@ from sklearn.metrics import silhouette_score
 from transformers import AutoModel, AutoTokenizer
 
 from dataset import load_balanced_prompt_dataset, validate_labels
-from generate import generate_with_layer_probes
-from visualization import save_best_layer_projection, save_layer_score_plot
+from generate import ensure_llada_config_compat, generate_with_layer_probes, install_transformers_tied_weights_compat
+from visualization import save_best_layer_projection, save_layer_projection, save_layer_score_plot
 
 
 LOGGER = logging.getLogger("probe_analysis")
@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probe-step", type=int, default=10, help="One-based denoising step to capture.")
     parser.add_argument("--max-prompt-length", type=int, default=512, help="Tokenizer truncation length.")
     parser.add_argument("--projection", default="pca", choices=["pca", "tsne"], help="Best-layer visualization method.")
+    parser.add_argument("--save-all-layer-projections", action="store_true", help="Save one projection image per layer.")
     parser.add_argument("--unsafe-split", default="train", help="Unsafe dataset split.")
     parser.add_argument("--safe-split", default="train", help="Safe dataset split.")
     return parser.parse_args()
@@ -189,11 +190,13 @@ def main() -> None:
         raise ValueError("Tokenizer pad_token_id equals LLaDA mask_id; probing would need a distinct pad token.")
 
     LOGGER.info("Loading model: %s", args.model_name)
+    install_transformers_tied_weights_compat()
     model = AutoModel.from_pretrained(
         args.model_name,
         trust_remote_code=True,
         torch_dtype=model_dtype(device),
     ).to(device).eval()
+    ensure_llada_config_compat(model)
 
     features_by_layer = extract_layer_features(
         model=model,
@@ -219,6 +222,18 @@ def main() -> None:
 
     projection_path = args.output_dir / f"best_layer_{args.projection}.png"
     save_best_layer_projection(features_by_layer[best_layer], labels, projection_path, method=args.projection, seed=args.seed)
+
+    if args.save_all_layer_projections:
+        layer_projection_dir = args.output_dir / f"layers_{args.projection}"
+        for layer_id in sorted(features_by_layer):
+            save_layer_projection(
+                features_by_layer[layer_id],
+                labels,
+                layer_projection_dir / f"layer_{layer_id:02d}_{args.projection}.png",
+                method=args.projection,
+                seed=args.seed,
+                title=f"Layer {layer_id} {args.projection.upper()} projection",
+            )
 
     LOGGER.info("Saved outputs to %s.", args.output_dir.resolve())
 

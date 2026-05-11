@@ -27,14 +27,15 @@ def save_layer_score_plot(layer_scores: Dict[int, float], output_path: Path) -> 
     plt.close()
 
 
-def save_best_layer_projection(
+def save_layer_projection(
     features: np.ndarray,
     labels: Sequence[int],
     output_path: Path,
     method: str = "pca",
     seed: int = 42,
+    title: str | None = None,
 ) -> None:
-    """Reduce best-layer features to 2D and save a safe/unsafe scatter plot."""
+    """Reduce layer features to 2D and save a safe/unsafe scatter plot."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -44,7 +45,7 @@ def save_best_layer_projection(
     if method == "pca":
         reducer = PCA(n_components=2, random_state=seed)
         reduced = reducer.fit_transform(features)
-        title = "Best layer PCA projection"
+        plot_title = title or "Layer PCA projection"
         x_label = "PC1"
         y_label = "PC2"
     elif method == "tsne":
@@ -52,7 +53,7 @@ def save_best_layer_projection(
         perplexity = min(perplexity, features.shape[0] - 1)
         reducer = TSNE(n_components=2, init="pca", learning_rate="auto", perplexity=perplexity, random_state=seed)
         reduced = reducer.fit_transform(features)
-        title = "Best layer t-SNE projection"
+        plot_title = title or "Layer t-SNE projection"
         x_label = "t-SNE 1"
         y_label = "t-SNE 2"
     else:
@@ -65,9 +66,27 @@ def save_best_layer_projection(
     plt.scatter(reduced[unsafe, 0], reduced[unsafe, 1], c="#dc2626", label="unsafe", alpha=0.8, edgecolors="none")
     plt.xlabel(x_label)
     plt.ylabel(y_label)
-    plt.title(title)
+    plt.title(plot_title)
     plt.legend()
     plt.grid(True, alpha=0.25)
     plt.tight_layout()
     plt.savefig(output_path, dpi=200)
     plt.close()
+
+
+def save_best_layer_projection(
+    features: np.ndarray,
+    labels: Sequence[int],
+    output_path: Path,
+    method: str = "pca",
+    seed: int = 42,
+) -> None:
+    """Reduce best-layer features to 2D and save a safe/unsafe scatter plot."""
+    save_layer_projection(
+        features=features,
+        labels=labels,
+        output_path=output_path,
+        method=method,
+        seed=seed,
+        title=f"Best layer {method.upper()} projection",
+    )

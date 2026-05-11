@@ -1,8 +1,64 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import inspect
 
 from transformers import AutoTokenizer, AutoModel
+
+
+def install_transformers_tied_weights_compat():
+    """
+    Backfill Transformers 5.x tied-weight bookkeeping for remote-code models
+    that still rely on the older `_tied_weights_keys` attribute.
+    """
+    from transformers.modeling_utils import PreTrainedModel
+
+    if getattr(PreTrainedModel, "_llada_tied_weights_compat_installed", False):
+        return
+
+    original_move_missing_keys = PreTrainedModel._move_missing_keys_from_meta_to_device
+
+    def move_missing_keys_with_tied_weights_compat(self, *args, **kwargs):
+        if not hasattr(self, "all_tied_weights_keys"):
+            try:
+                self.all_tied_weights_keys = self.get_expanded_tied_weights_keys(all_submodels=True)
+            except Exception:
+                self.all_tied_weights_keys = {}
+
+        tie_weights = getattr(self, "tie_weights", None)
+        if callable(tie_weights) and not getattr(tie_weights, "_llada_compat_wrapped", False):
+            signature = inspect.signature(tie_weights)
+            accepts_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            accepts_missing_keys = "missing_keys" in signature.parameters
+            accepts_recompute_mapping = "recompute_mapping" in signature.parameters
+            if not (accepts_kwargs or (accepts_missing_keys and accepts_recompute_mapping)):
+                original_tie_weights = tie_weights
+
+                def tie_weights_with_compat(*_args, **_kwargs):
+                    return original_tie_weights()
+
+                tie_weights_with_compat._llada_compat_wrapped = True
+                self.tie_weights = tie_weights_with_compat
+
+        return original_move_missing_keys(self, *args, **kwargs)
+
+    PreTrainedModel._move_missing_keys_from_meta_to_device = move_missing_keys_with_tied_weights_compat
+    PreTrainedModel._llada_tied_weights_compat_installed = True
+
+
+def ensure_llada_config_compat(model):
+    """Populate config defaults expected by the LLaDA remote-code wrapper."""
+    defaults = {
+        "use_cache": False,
+        "use_return_dict": True,
+    }
+    for name, value in defaults.items():
+        if not hasattr(model.config, name):
+            setattr(model.config, name, value)
+    return model
 
 
 def add_gumbel_noise(logits, temperature):
@@ -42,6 +98,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 def _model_forward(model, input_ids, attention_mask=None, output_hidden_states=False):
     """Run a model forward pass while supporting remote-code model variants."""
+    ensure_llada_config_compat(model)
     kwargs = {}
     if attention_mask is not None:
         kwargs["attention_mask"] = attention_mask
@@ -370,7 +427,9 @@ def generate_with_layer_probes(model, prompt, attention_mask=None, steps=64, gen
 def main():
     device = 'cuda'
 
+    install_transformers_tied_weights_compat()
     model = AutoModel.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
+    ensure_llada_config_compat(model)
     tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct', trust_remote_code=True)
 
     # The LLaDA architecture theoretically supports both left-padding and right-padding. 
