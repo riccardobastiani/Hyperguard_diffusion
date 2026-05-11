@@ -1,5 +1,6 @@
 import logging
 import random
+from pathlib import Path
 from typing import List, Sequence, Tuple
 
 from datasets import Dataset, DatasetDict, load_dataset
@@ -42,10 +43,26 @@ def _collect_prompts(dataset: Dataset, text_builder, sample_count: int) -> List[
     return prompts
 
 
+def _load_local_prompts(data_path: Path, field_name: str, sample_count: int, seed: int) -> List[str]:
+    """Load prompts from a local JSON/CSV file and return a deterministic sample."""
+    suffix = data_path.suffix.lower()
+    if suffix == ".json":
+        dataset = Dataset.from_json(str(data_path))
+    elif suffix == ".csv":
+        dataset = Dataset.from_csv(str(data_path))
+    else:
+        raise ValueError(f"Unsupported local dataset format: {data_path}. Use .json or .csv.")
+
+    dataset = dataset.shuffle(seed=seed)
+    return _collect_prompts(dataset, lambda row: (row.get(field_name) or ""), sample_count)
+
+
 def load_balanced_prompt_dataset(
     samples_per_class: int = 50,
     seed: int = 42,
     safe_dataset_name: str = "tatsu-lab/alpaca",
+    safe_local_path: str | None = None,
+    safe_local_field: str = "Refined_behavior",
     unsafe_dataset_name: str = "saralazza/llada-safety-dataset",
     safe_split: str = "train",
     unsafe_split: str = "train",
@@ -53,17 +70,22 @@ def load_balanced_prompt_dataset(
     """
     Load balanced safe and unsafe prompts.
 
-    Safe prompts come from Alpaca using instruction plus input. Unsafe prompts
-    come from the LLaDA safety dataset using refined_behavior. Labels are
-    safe=0 and unsafe=1.
+    Safe prompts come from a local JSON/CSV field when provided; otherwise they
+    come from Alpaca using instruction plus input. Unsafe prompts come from the
+    LLaDA safety dataset using refined_behavior. Labels are safe=0 and unsafe=1.
     """
     if samples_per_class < 1:
         raise ValueError("samples_per_class must be positive.")
 
-    LOGGER.info("Loading safe dataset: %s", safe_dataset_name)
-    safe_dataset = _resolve_split(load_dataset(safe_dataset_name), safe_split)
-    safe_dataset = safe_dataset.shuffle(seed=seed)
-    safe_prompts = _collect_prompts(safe_dataset, _safe_alpaca_prompt, samples_per_class)
+    if safe_local_path:
+        safe_path = Path(safe_local_path)
+        LOGGER.info("Loading local safe dataset: %s (%s)", safe_path, safe_local_field)
+        safe_prompts = _load_local_prompts(safe_path, safe_local_field, samples_per_class, seed)
+    else:
+        LOGGER.info("Loading safe dataset: %s", safe_dataset_name)
+        safe_dataset = _resolve_split(load_dataset(safe_dataset_name), safe_split)
+        safe_dataset = safe_dataset.shuffle(seed=seed)
+        safe_prompts = _collect_prompts(safe_dataset, _safe_alpaca_prompt, samples_per_class)
 
     LOGGER.info("Loading unsafe dataset: %s", unsafe_dataset_name)
     unsafe_dataset = _resolve_split(load_dataset(unsafe_dataset_name), unsafe_split)

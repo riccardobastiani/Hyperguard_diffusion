@@ -6,9 +6,11 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-probe_outputs}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 
 MODEL_NAME="${MODEL_NAME:-GSAI-ML/LLaDA-8B-Instruct}"
+SAFE_LOCAL_PATH="${SAFE_LOCAL_PATH:-AlpacaDIJA/llada_instruct_DIJA_v1.json}"
+SAFE_LOCAL_FIELD="${SAFE_LOCAL_FIELD:-Refined_behavior}"
 SAMPLES_PER_CLASS="${SAMPLES_PER_CLASS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
-DEVICE="${DEVICE:-auto}"
+DEVICE="${DEVICE:-cuda}"
 SEED="${SEED:-42}"
 STEPS="${STEPS:-64}"
 GEN_LENGTH="${GEN_LENGTH:-64}"
@@ -21,6 +23,8 @@ for PROBE_STEP in ${PROBE_STEPS}; do
 
   "${PYTHON}" probe_analysis.py \
     --model-name "${MODEL_NAME}" \
+    --safe-local-path "${SAFE_LOCAL_PATH}" \
+    --safe-local-field "${SAFE_LOCAL_FIELD}" \
     --samples-per-class "${SAMPLES_PER_CLASS}" \
     --batch-size "${BATCH_SIZE}" \
     --device "${DEVICE}" \

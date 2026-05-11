@@ -16,7 +16,17 @@ def install_transformers_tied_weights_compat():
     if getattr(PreTrainedModel, "_llada_tied_weights_compat_installed", False):
         return
 
-    original_move_missing_keys = PreTrainedModel._move_missing_keys_from_meta_to_device
+    move_missing_keys_name = None
+    for candidate in ("_move_missing_keys_from_meta_to_device", "_move_missing_keys_from_meta_to_cpu"):
+        if hasattr(PreTrainedModel, candidate):
+            move_missing_keys_name = candidate
+            break
+
+    if move_missing_keys_name is None:
+        PreTrainedModel._llada_tied_weights_compat_installed = True
+        return
+
+    original_move_missing_keys = getattr(PreTrainedModel, move_missing_keys_name)
 
     def move_missing_keys_with_tied_weights_compat(self, *args, **kwargs):
         if not hasattr(self, "all_tied_weights_keys"):
@@ -45,7 +55,7 @@ def install_transformers_tied_weights_compat():
 
         return original_move_missing_keys(self, *args, **kwargs)
 
-    PreTrainedModel._move_missing_keys_from_meta_to_device = move_missing_keys_with_tied_weights_compat
+    setattr(PreTrainedModel, move_missing_keys_name, move_missing_keys_with_tied_weights_compat)
     PreTrainedModel._llada_tied_weights_compat_installed = True
 
 

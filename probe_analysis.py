@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-prompt-length", type=int, default=512, help="Tokenizer truncation length.")
     parser.add_argument("--projection", default="pca", choices=["pca", "tsne"], help="Best-layer visualization method.")
     parser.add_argument("--save-all-layer-projections", action="store_true", help="Save one projection image per layer.")
+    parser.add_argument("--safe-local-path", type=Path, help="Optional local JSON/CSV file for safe prompts.")
+    parser.add_argument("--safe-local-field", default="Refined_behavior", help="Field to read from --safe-local-path.")
     parser.add_argument("--unsafe-split", default="train", help="Unsafe dataset split.")
     parser.add_argument("--safe-split", default="train", help="Safe dataset split.")
     return parser.parse_args()
@@ -177,6 +179,8 @@ def main() -> None:
     prompts, labels = load_balanced_prompt_dataset(
         samples_per_class=args.samples_per_class,
         seed=args.seed,
+        safe_local_path=str(args.safe_local_path) if args.safe_local_path else None,
+        safe_local_field=args.safe_local_field,
         safe_split=args.safe_split,
         unsafe_split=args.unsafe_split,
     )
