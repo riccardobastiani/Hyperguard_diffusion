@@ -8,9 +8,25 @@ def parse_args():
     parser.add_argument('--input', required=True, help='Path to the eval results JSON file')
     parser.add_argument('--output_json', required=True, help='Path for the output JSON file')
     parser.add_argument('--output_csv', required=True, help='Path for the output CSV file')
+    parser.add_argument(
+        '--filter',
+        choices=['asr_e', 'asr_k', 'all'],
+        default='asr_e',
+        help='Which rows to keep: asr_e for harmful jailbreak datasets, asr_k for non-refusal, all for harmless datasets.'
+    )
     return parser.parse_args()
 
-def process_jailbreaks(input_file, file_output_json, file_output_csv):
+def is_positive_label(value):
+    return value is True or value == 1 or (isinstance(value, float) and value >= 0.5)
+
+def should_keep(entry, filter_mode):
+    if filter_mode == 'all':
+        return True
+    if filter_mode == 'asr_k':
+        return is_positive_label(entry.get('asr_k_label', 0))
+    return is_positive_label(entry.get('asr_e_label', 0))
+
+def process_jailbreaks(input_file, file_output_json, file_output_csv, filter_mode='asr_e'):
     # Carica i dati dal file dei risultati di valutazione
     with open(input_file, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -24,9 +40,7 @@ def process_jailbreaks(input_file, file_output_json, file_output_csv):
         entries = data
 
     for entry in entries:
-        # Support bool (true/false), int (1/0), and float (>=0.5)
-        asr_e = entry.get('asr_e_label', 0)
-        if asr_e is True or asr_e == 1 or (isinstance(asr_e, float) and asr_e >= 0.5):
+        if should_keep(entry, filter_mode):
             response_text = entry.get('generation') or entry.get('response', '')
 
             record = {
@@ -52,4 +66,4 @@ def process_jailbreaks(input_file, file_output_json, file_output_csv):
 
 if __name__ == "__main__":
     args = parse_args()
-    process_jailbreaks(args.input, args.output_json, args.output_csv)
+    process_jailbreaks(args.input, args.output_json, args.output_csv, args.filter)
