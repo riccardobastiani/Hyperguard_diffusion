@@ -19,12 +19,17 @@ def parse_args():
 def is_positive_label(value):
     return value is True or value == 1 or (isinstance(value, float) and value >= 0.5)
 
-def should_keep(entry, filter_mode):
+def should_keep(entry, filter_mode, invert_asr_e=False):
     if filter_mode == 'all':
         return True
     if filter_mode == 'asr_k':
         return is_positive_label(entry.get('asr_k_label', 0))
-    return is_positive_label(entry.get('asr_e_label', 0))
+    asr_e_value = is_positive_label(entry.get('asr_e_label', 0))
+    return (not asr_e_value) if invert_asr_e else asr_e_value
+
+def is_run_alpaca_path(input_file):
+    parts = os.path.normpath(input_file).lower().split(os.sep)
+    return 'run_alpaca' in parts
 
 def process_jailbreaks(input_file, file_output_json, file_output_csv, filter_mode='asr_e'):
     # Carica i dati dal file dei risultati di valutazione
@@ -39,8 +44,10 @@ def process_jailbreaks(input_file, file_output_json, file_output_csv, filter_mod
     else:
         entries = data
 
+    invert_asr_e = filter_mode == 'asr_e' and is_run_alpaca_path(input_file)
+
     for entry in entries:
-        if should_keep(entry, filter_mode):
+        if should_keep(entry, filter_mode, invert_asr_e=invert_asr_e):
             response_text = entry.get('generation') or entry.get('response', '')
 
             record = {

@@ -1,5 +1,8 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 if [ "$#" -ne 4 ]; then
     echo "Usage: $0 <attack_method> <defense_method> <model_name> <version>"
     exit 1
@@ -10,7 +13,7 @@ defense_method=$2
 model_name=$3
 version=$4
 together_api_key=""  # TODO: set your Together API key here (used only if not using local judge)
-judge_model_path="/workspace/Hyperguard_diffusion/run_advbench/hf_models/Meta-Llama-3-8B-Instruct"
+judge_model_path="${ROOT_DIR}/hf_models/Llama-Guard-3-8B"
 use_local_judge=true  # Set to false to use Together API instead
 
 API_KEY=""   # TODO: Set your OpenAI API key here if needed
@@ -21,60 +24,60 @@ export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=memory.used --format=csv,no
 echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
 # Navigate to working directory
-cd /workspace/Hyperguard_diffusion/run_advbench || { echo "Failed to change directory"; exit 1; }
+cd "${ROOT_DIR}/run_advbench" || { echo "Failed to change directory"; exit 1; }
 
 # Define paths based on model name
 if [[ "$model_name" == *"llada_instruct"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/LLaDA-8B-Instruct"
+    model_path="${ROOT_DIR}/hf_models/LLaDA-8B-Instruct"
     python_script="models/advbench_llada.py"
     steps=128
     gen_length=128
     mask_id=126336
     mask_counts=36
 elif [[ "$model_name" == *"llada_1.5"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/LLaDA-1.5"
+    model_path="${ROOT_DIR}/hf_models/LLaDA-1.5"
     python_script="models/advbench_llada.py"
     steps=128
     gen_length=128
     mask_id=126336
     mask_counts=36
 elif [[ "$model_name" == *"dream_instruct"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/Dream-v0-Instruct-7B"
+    model_path="${ROOT_DIR}/hf_models/Dream-v0-Instruct-7B"
     python_script="models/advbench_dream.py"
     steps=64
     gen_length=64
     mask_id=151666
     mask_counts=36
 elif [[ "$model_name" == *"dream_coder_instruct"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/Dream-Coder-v0-Instruct-7B"
+    model_path="${ROOT_DIR}/hf_models/Dream-Coder-v0-Instruct-7B"
     python_script="models/advbench_dream.py"
     steps=64
     gen_length=64
     mask_id=151666
     mask_counts=36
 elif [[ "$model_name" == *"dreamon_instruct"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/DreamOn-v0-7B"
+    model_path="${ROOT_DIR}/hf_models/DreamOn-v0-7B"
     python_script="models/advbench_dream.py"
     steps=64
     gen_length=64
     mask_id=151666
     mask_counts=36
 elif [[ "$model_name" == *"diffucoder_instruct"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/DiffuCoder-7B-Instruct"
+    model_path="${ROOT_DIR}/hf_models/DiffuCoder-7B-Instruct"
     python_script="models/advbench_dream.py"
     steps=64
     gen_length=64
     mask_id=151666
     mask_counts=36
 elif [[ "$model_name" == *"diffucoder_cpgrpo"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/DiffuCoder-7B-cpGRPO"
+    model_path="${ROOT_DIR}/hf_models/DiffuCoder-7B-cpGRPO"
     python_script="models/advbench_dream.py"
     steps=64
     gen_length=64
     mask_id=151666
     mask_counts=36
 elif [[ "$model_name" == *"mmada_mixcot"* ]]; then
-    model_path="/workspace/Hyperguard_diffusion/hf_models/MMaDA-8B-MixCoT"
+    model_path="${ROOT_DIR}/hf_models/MMaDA-8B-MixCoT"
     python_script="models/advbench_mmada.py"
     steps=128
     gen_length=128
@@ -85,22 +88,22 @@ else
     exit 1
 fi
 
-attack_prompt="/workspace/Hyperguard_diffusion/run_advbench/refine_prompt/advbench_data_refined_${version}.json"
-output_json="/workspace/Hyperguard_diffusion/run_advbench/attack_results/${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
-save_path="/workspace/Hyperguard_diffusion/run_advbench/eval_results/eval_results_${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
+attack_prompt="${ROOT_DIR}/run_advbench/refine_prompt/advbench_data_refined_${version}.json"
+output_json="${ROOT_DIR}/run_advbench/attack_results/${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
+save_path="${ROOT_DIR}/run_advbench/eval_results/eval_results_${model_name}_${attack_method}_attack_${defense_method}_defense_${version}.json"
 
 # Run the jailbreak attack
-echo "Running model inference with ${python_script}..."
-python ${python_script} \
-    --model_path "${model_path}" \
-    --attack_prompt "${attack_prompt}" \
-    --output_json "${output_json}" \
-    --steps ${steps} \
-    --gen_length ${gen_length} \
-    --mask_id ${mask_id} \
-    --mask_counts ${mask_counts} \
-    --attack_method "${attack_method}" \
-    --defense_method "${defense_method}"
+#echo "Running model inference with ${python_script}..."
+#python ${python_script} \
+#    --model_path "${model_path}" \
+#    --attack_prompt "${attack_prompt}" \
+#    --output_json "${output_json}" \
+#    --steps ${steps} \
+#    --gen_length ${gen_length} \
+#    --mask_id ${mask_id} \
+#    --mask_counts ${mask_counts} \
+#    --attack_method "${attack_method}" \
+#    --defense_method "${defense_method}"
 
 # Run ASR-e evaluation
 echo "Running AdvBench ASR-e..."

@@ -6,7 +6,10 @@ import sys
 import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-from benchmarks.jailbreakbench.src.jailbreakbench.classifier import Llama3JailbreakJudge, Llama3JailbreakJudge_locally
+from benchmarks.jailbreakbench.src.jailbreakbench.classifier import (
+    Llama3JailbreakJudge,
+    LlamaGuard3JailbreakJudge_locally,
+)
 
 
 def load_data(file_path):
@@ -28,7 +31,7 @@ def extract_prompts_and_responses(data):
 
 def classify_jailbreaks(prompts, responses, api_key=None, model_path=None, local=False):
     if local:
-        classifier = Llama3JailbreakJudge_locally(model_path=model_path)
+        classifier = LlamaGuard3JailbreakJudge_locally(model_path=model_path)
     else:
         classifier = Llama3JailbreakJudge(api_key)
     return classifier.classify_responses(prompts, responses)

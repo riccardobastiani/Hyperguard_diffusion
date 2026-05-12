@@ -16,6 +16,7 @@ DATASETS = {
     "harmbench": DATA_ROOT / "harmbench" / "llada_jailbreak_dataset_harmbench.json",
     "jailbreakbench": DATA_ROOT / "jailbreakbench" / "llada_instruct_DIJA_v1.json",
     "strongreject": DATA_ROOT / "strongreject" / "llada_jailbreak_dataset_strongreject.json",
+    "alpaca": DATA_ROOT / "alpaca" / "llada_instruct_DIJA_v1.json",
 }
 
 HF_USERNAME = "saralazza"
@@ -179,7 +180,7 @@ create_repo(
 
 print("Uploading to Hugging Face Hub...")
 
-hf_dataset.push_to_hub(repo_id)
+hf_dataset.push_to_hub(repo_id, commit_message="Updated dataset with new preprocessing and dedup")
 
 print("Done!")
 print(f"Dataset uploaded to: https://huggingface.co/datasets/{repo_id}")

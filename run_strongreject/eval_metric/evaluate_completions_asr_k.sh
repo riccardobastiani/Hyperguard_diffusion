@@ -1,8 +1,9 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-
-cd /workspace/Hyperguard_diffusion/run_strongreject
+cd "${ROOT_DIR}/run_strongreject"
 
 
 model_name=$1

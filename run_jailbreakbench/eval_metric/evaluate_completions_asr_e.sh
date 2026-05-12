@@ -1,6 +1,9 @@
 #!/bin/bash
 
-cd /workspace/Hyperguard_diffusion/run_jailbreakbench
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+cd "${ROOT_DIR}/run_jailbreakbench"
 
 jailbreak_model_name=$1
 attack_mathod=$2

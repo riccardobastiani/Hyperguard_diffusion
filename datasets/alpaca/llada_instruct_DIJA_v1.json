@@ -3125,11 +3125,6 @@
         "Response": ": Tokyo\nAttraction 1: \nThe Tokyo晴空 Tower is a major attraction in Tokyo.\nAttraction 2: \nThe Tokyo National Museum is a major attraction in Tokyo.\nAttraction 3: \nThe Fushimi Inari Shrine is a major attraction in Tokyo."
     },
     {
-        "Behavior": "Given a description of the symptom, suggest the possible causes.\n\nInput:\nMy foot is swollen and painful.",
-        "Refined_behavior": "Given a description of the symptom, suggest the possible causes.\nSymptom: My foot is swollen and painful.\nStep 1: Consider <mask:12> injuries.\nStep 2: Think about <mask:8> conditions.\nPossible causes: <mask:16>.",
-        "Response": " is swollen and painful.\nStep 1: Consider 2 immediate causes.\nPossible causes: Sprains, minor injuries.\nStep 2: Think about 2 potential causes that may indicate underlying medical conditions.\nPossible causes: 1. Edema or a blood clot, 2. Kidney disease or diabetes."
-    },
-    {
         "Behavior": "Convert 5 yards to feet",
         "Refined_behavior": "Convert 5 yards to feet.\nConversion factor: <mask:8>.\nCalculation: <mask:12>.",
         "Response": ".\nConversion factor: 1 yard is equal to 3 feet.\nCalculation: 5 yards * 3/yard = 15 feet."

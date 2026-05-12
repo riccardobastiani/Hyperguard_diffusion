@@ -2,19 +2,22 @@
 
 # export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-cd /workspace/Hyperguard_diffusion/run_harmbench/refine_prompt
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+cd "${ROOT_DIR}/run_harmbench/refine_prompt"
 
 version=$1
-hf_model_path="/workspace/Hyperguard_diffusion/hf_models/Qwen2.5-7B-Instruct"
+hf_model_path="${ROOT_DIR}/hf_models/Qwen2.5-7B-Instruct"
 
 # TODO: Set your API key and base URL if using an API model
 api_model_name=""
 api_key=""
 base_url=""
 
-prompt_template_path="/workspace/Hyperguard_diffusion/run_harmbench/refine_prompt/redteam_prompt_template.txt"
-attack_prompt="/workspace/Hyperguard_diffusion/benchmarks/HarmBench/data/behavior_datasets/harmbench_behaviors_text_all.csv"
-output_json="/workspace/Hyperguard_diffusion/run_harmbench/refine_prompt/harmbench_behaviors_text_all_refined_${version}.json"
+prompt_template_path="${ROOT_DIR}/run_harmbench/refine_prompt/redteam_prompt_template.txt"
+attack_prompt="${ROOT_DIR}/benchmarks/HarmBench/data/behavior_datasets/harmbench_behaviors_text_all.csv"
+output_json="${ROOT_DIR}/run_harmbench/refine_prompt/harmbench_behaviors_text_all_refined_${version}.json"
 max_new_tokens=200
 
 

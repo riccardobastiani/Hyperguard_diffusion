@@ -1,8 +1,9 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-
-cd /workspace/Hyperguard_diffusion/run_jailbreakbench
+cd "${ROOT_DIR}/run_jailbreakbench"
 
 
 model_name=$1

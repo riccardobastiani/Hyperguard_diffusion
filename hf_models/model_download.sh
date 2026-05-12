@@ -11,4 +11,4 @@
 # After refinement is complete, free space by running:
 #   rm -rf ./Qwen2.5-7B-Instruct
 # Then download the judge model:
-  huggingface-cli download meta-llama/Meta-Llama-3-8B-Instruct --local-dir ./Meta-Llama-3-8B-Instruct --exclude "original/*"
+  huggingface-cli download meta-llama/Llama-Guard-3-8B --local-dir ./Llama-Guard-3-8B --exclude "original/*"

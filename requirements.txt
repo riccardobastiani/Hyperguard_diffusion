@@ -36,9 +36,7 @@ anyio==4.9.0
     #   httpx
     #   openai
 async-timeout==5.0.1
-    # via
-    #   -r requirements.in
-    #   aiohttp
+    # via -r requirements.in
 attrs==25.3.0
     # via
     #   -r requirements.in
@@ -175,11 +173,7 @@ et-xmlfile==2.0.0
 evaluate==0.4.3
     # via -r requirements.in
 exceptiongroup==1.3.0
-    # via
-    #   -r requirements.in
-    #   anyio
-    #   hypothesis
-    #   pytest
+    # via -r requirements.in
 factualscenegraph==0.6.1
     # via
     #   -r requirements.in
@@ -860,6 +854,7 @@ setuptools==82.0.1
     #   pytablewriter
     #   spacy
     #   thinc
+    #   torch
     #   wandb
 shellingham==1.5.4
     # via
@@ -953,11 +948,7 @@ tokenizers==0.21.1
     #   litellm
     #   transformers
 tomli==2.2.1
-    # via
-    #   -r requirements.in
-    #   black
-    #   mypy
-    #   pytest
+    # via -r requirements.in
 toolz==1.0.0
     # via
     #   -r requirements.in
@@ -1024,18 +1015,14 @@ typing-extensions==4.13.2
     #   -r requirements.in
     #   anthropic
     #   anyio
-    #   black
-    #   cloudpathlib
     #   exceptiongroup
     #   google-generativeai
     #   huggingface-hub
-    #   multidict
     #   mypy
     #   openai
     #   pydantic
     #   pydantic-core
     #   referencing
-    #   rich
     #   sentence-transformers
     #   torch
     #   typer

@@ -4,6 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import json
 import argparse
 import os
+from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import sys
@@ -12,7 +13,8 @@ transformers.utils.logging.set_verbosity_error()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Running red teaming evaluation with Llama Guard 3.")
-    parser.add_argument("--cls_path", type=str, default='/workspace/Hyperguard_diffusion/hf_models/Llama-Guard-3-8B')
+    default_cls_path = Path(__file__).resolve().parents[2] / "hf_models" / "Llama-Guard-3-8B"
+    parser.add_argument("--cls_path", type=str, default=str(default_cls_path))
     parser.add_argument("--completions_path", type=str, required=True)
     parser.add_argument("--save_path", type=str, required=True)
     parser.add_argument("--num_tokens", type=int, default=512)
