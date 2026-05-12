@@ -1,0 +1,32 @@
+{
+  "hook": {
+    "selected_layers": [15, 23, 31],
+    "selected_steps": [5, 10, 15],
+    "pool": "mean",
+    "offload_to_cpu": false,
+    "keep_sequence": false
+  },
+  "geometry": {
+    "hidden_dim": 4096,
+    "hyperbolic_dim": 128,
+    "curvature_k": 1.0,
+    "max_tangent_norm": 15.0
+  },
+  "svdd": {
+    "nu": 0.1,
+    "radius_init": 1.0,
+    "score_squared": false
+  },
+  "runtime": {
+    "selected_steps": [5, 10, 15],
+    "step_weights": {
+      "5": 0.25,
+      "10": 0.35,
+      "15": 0.4
+    },
+    "threshold": 1.0,
+    "layer_reduce": "mean",
+    "accumulation": "weighted_sum",
+    "stop_on_first_threshold": true
+  }
+}
