@@ -1,6 +1,6 @@
 torch
+numpy
 transformers
 datasets
 scikit-learn
-matplotlib
-numpy
+pandas
