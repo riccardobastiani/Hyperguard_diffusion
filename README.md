@@ -26,8 +26,8 @@ In this space:
 - Base model: **LLaDA-8B-Instruct**
 - Hardware target: ~16GB VRAM
 - Datasets:
-  - Safe prompts (benign behavior)
-  - Adversarial prompts (PAD / DIJA attacks from HarmBench)
+  - Safe prompts (rows with source_dataset=alpaca)
+  - Adversarial prompts (all other rows)
 
 ---
 
@@ -98,8 +98,10 @@ python probe_analysis.py --samples-per-class 50 --batch-size 1 --device auto
 
 The script loads:
 
-- safe prompts from `tatsu-lab/alpaca` using `instruction` plus `input`
-- unsafe prompts from `saralazza/llada-safety-dataset` using `refined_behavior`
+- safe prompts from `saralazza/llada-safety-dataset` where `source_dataset=alpaca`
+  using `instruction` plus `input`
+- unsafe prompts from the same dataset (all other `source_dataset` values)
+  using `refined_behavior` with fallbacks
 
 It writes the analysis artifacts to `probe_outputs/`:
 

@@ -21,6 +21,35 @@ def _resolve_split(dataset: DatasetDict, preferred_split: str) -> Dataset:
 
 def _safe_alpaca_prompt(row) -> str:
     """Build a benign prompt from Alpaca instruction and optional input."""
+    refined = (row.get("refined_behavior") or "").strip()
+    if refined:
+        return refined
+
+    behavior = (row.get("behavior") or "").strip()
+    if behavior:
+        return behavior
+
+    instruction = (row.get("instruction") or "").strip()
+    input_text = (row.get("input") or "").strip()
+    if instruction and input_text:
+        return f"{instruction}\n\n{input_text}"
+    return instruction or input_text
+
+
+def _unsafe_prompt(row) -> str:
+    """Build an unsafe prompt with fallbacks for heterogeneous datasets."""
+    refined = (row.get("refined_behavior") or "").strip()
+    if refined:
+        return refined
+
+    prompt = (row.get("prompt") or "").strip()
+    if prompt:
+        return prompt
+
+    behavior = (row.get("behavior") or "").strip()
+    if behavior:
+        return behavior
+
     instruction = (row.get("instruction") or "").strip()
     input_text = (row.get("input") or "").strip()
     if instruction and input_text:
@@ -60,41 +89,48 @@ def _load_local_prompts(data_path: Path, field_name: str, sample_count: int, see
 def load_balanced_prompt_dataset(
     samples_per_class: int = 50,
     seed: int = 42,
-    safe_dataset_name: str = "tatsu-lab/alpaca",
+    safety_dataset_name: str = "saralazza/llada-safety-dataset",
     safe_local_path: str | None = None,
     safe_local_field: str = "Refined_behavior",
-    unsafe_dataset_name: str = "saralazza/llada-safety-dataset",
     safe_split: str = "train",
     unsafe_split: str = "train",
+    safe_source_name: str = "alpaca",
 ) -> Tuple[List[str], List[int]]:
     """
     Load balanced safe and unsafe prompts.
 
     Safe prompts come from a local JSON/CSV field when provided; otherwise they
-    come from Alpaca using instruction plus input. Unsafe prompts come from the
-    LLaDA safety dataset using refined_behavior. Labels are safe=0 and unsafe=1.
+    come from the LLaDA safety dataset where source_dataset == safe_source_name
+    using instruction plus input. Unsafe prompts come from the same dataset
+    using rows where source_dataset != safe_source_name. Labels are safe=0 and
+    unsafe=1.
     """
     if samples_per_class < 1:
         raise ValueError("samples_per_class must be positive.")
 
+    dataset_dict = None
     if safe_local_path:
         safe_path = Path(safe_local_path)
         LOGGER.info("Loading local safe dataset: %s (%s)", safe_path, safe_local_field)
         safe_prompts = _load_local_prompts(safe_path, safe_local_field, samples_per_class, seed)
     else:
-        LOGGER.info("Loading safe dataset: %s", safe_dataset_name)
-        safe_dataset = _resolve_split(load_dataset(safe_dataset_name), safe_split)
-        safe_dataset = safe_dataset.shuffle(seed=seed)
+        LOGGER.info("Loading safety dataset: %s", safety_dataset_name)
+        dataset_dict = load_dataset(safety_dataset_name)
+
+        safe_dataset = _resolve_split(dataset_dict, safe_split)
+        safe_dataset = safe_dataset.filter(
+            lambda row: (row.get("source_dataset") or "").strip().lower() == safe_source_name.lower()
+        ).shuffle(seed=seed)
         safe_prompts = _collect_prompts(safe_dataset, _safe_alpaca_prompt, samples_per_class)
 
-    LOGGER.info("Loading unsafe dataset: %s", unsafe_dataset_name)
-    unsafe_dataset = _resolve_split(load_dataset(unsafe_dataset_name), unsafe_split)
-    unsafe_dataset = unsafe_dataset.shuffle(seed=seed)
-    unsafe_prompts = _collect_prompts(
-        unsafe_dataset,
-        lambda row: (row.get("refined_behavior") or ""),
-        samples_per_class,
-    )
+    LOGGER.info("Loading unsafe samples from: %s", safety_dataset_name)
+    if dataset_dict is None:
+        dataset_dict = load_dataset(safety_dataset_name)
+    unsafe_dataset = _resolve_split(dataset_dict, unsafe_split)
+    unsafe_dataset = unsafe_dataset.filter(
+        lambda row: (row.get("source_dataset") or "").strip().lower() != safe_source_name.lower()
+    ).shuffle(seed=seed)
+    unsafe_prompts = _collect_prompts(unsafe_dataset, _unsafe_prompt, samples_per_class)
 
     examples = [(prompt, 0) for prompt in safe_prompts]
     examples.extend((prompt, 1) for prompt in unsafe_prompts)

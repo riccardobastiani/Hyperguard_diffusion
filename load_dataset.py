@@ -8,6 +8,7 @@ from collections import Counter
 # =========================
 
 DATASET_NAME = "saralazza/llada-safety-dataset"
+SAFE_SOURCE_NAME = "alpaca"
 OUTPUT_DIR = Path("dataset")
 
 
@@ -66,7 +67,16 @@ for split_name, split_dataset in dataset.items():
             f"({percentage:.2f}%)"
         )
 
-    print("\n")
+    safe_count = sum(
+        count
+        for source_name, count in source_counter.items()
+        if (source_name or "").strip().lower() == SAFE_SOURCE_NAME
+    )
+    unsafe_count = num_samples - safe_count
+
+    print("\nSafety split counts:")
+    print(f"  - safe (source_dataset={SAFE_SOURCE_NAME}): {safe_count}")
+    print(f"  - unsafe (all others): {unsafe_count}\n")
 
 
 print("========================================")
