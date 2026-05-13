@@ -190,38 +190,45 @@ def main() -> None:
         safe_split=args.safe_split,
         unsafe_split=args.unsafe_split,
     )
+    print(f"Loaded {len(prompts)} prompts.")
     validate_labels(labels)
 
-    LOGGER.info("Loading tokenizer: %s", args.model_name)
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
-    if tokenizer.padding_side != "left":
-        tokenizer.padding_side = "left"
-    if tokenizer.pad_token_id == 126336:
-        raise ValueError("Tokenizer pad_token_id equals LLaDA mask_id; probing would need a distinct pad token.")
-
-    LOGGER.info("Loading model: %s", args.model_name)
-    install_transformers_tied_weights_compat()
-    model = AutoModel.from_pretrained(
-        args.model_name,
-        trust_remote_code=True,
-        torch_dtype=model_dtype(device),
-    ).to(device).eval()
-    ensure_llada_config_compat(model)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"output directory: {args.output_dir}")
     safe_probe_path = args.output_dir / "safe_probes.npz"
     unsafe_probe_path = args.output_dir / "unsafe_probes.npz"
 
     use_cache = safe_probe_path.exists() and unsafe_probe_path.exists()
+    print(f"use_cache: {use_cache}, safe_probe_path: {safe_probe_path}, unsafe_probe_path: {unsafe_probe_path}, safe_probe_exists: {safe_probe_path.exists()}, unsafe_probe_exists: {unsafe_probe_path.exists()}")
     if use_cache:
         LOGGER.info("Loading cached probes from %s.", args.output_dir)
-        safe_features = _load_probe_cache(safe_probe_path, args.probe_steps)
-        unsafe_features = _load_probe_cache(unsafe_probe_path, args.probe_steps)
-        if not (_is_finite_probe_cache(safe_features) and _is_finite_probe_cache(unsafe_features)):
-            LOGGER.warning("Cached probes contain NaN/Inf; recomputing probes.")
+        try:
+            safe_features = _load_probe_cache(safe_probe_path, args.probe_steps)
+            unsafe_features = _load_probe_cache(unsafe_probe_path, args.probe_steps)
+            if not (_is_finite_probe_cache(safe_features) and _is_finite_probe_cache(unsafe_features)):
+                LOGGER.warning("Cached probes contain NaN/Inf; recomputing probes.")
+                use_cache = False
+        except KeyError as exc:
+            LOGGER.warning("Cache missing requested probe step (%s); recomputing probes.", exc)
             use_cache = False
 
     if not use_cache:
+        LOGGER.info("Loading tokenizer: %s", args.model_name)
+        tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
+        if tokenizer.padding_side != "left":
+            tokenizer.padding_side = "left"
+        if tokenizer.pad_token_id == 126336:
+            raise ValueError("Tokenizer pad_token_id equals LLaDA mask_id; probing would need a distinct pad token.")
+
+        LOGGER.info("Loading model: %s", args.model_name)
+        install_transformers_tied_weights_compat()
+        model = AutoModel.from_pretrained(
+            args.model_name,
+            trust_remote_code=True,
+            torch_dtype=model_dtype(device),
+        ).to(device).eval()
+        ensure_llada_config_compat(model)
+
         features_by_step = extract_layer_features(
             model=model,
             tokenizer=tokenizer,
@@ -266,12 +273,8 @@ def main() -> None:
         next(iter(unsafe_features.values())).shape[0],
     )
 
-    in_dim = getattr(model.config, "hidden_size", 4096)
-    projector = HyperbolicProjection(
-        in_dim=in_dim,
-        proj_dim=args.proj_dim,
-        curvature=args.curvature,
-    ).to(device)
+    # Infer in_dim from probe features when the model was not loaded (cache hit)
+    in_dim = next(iter(safe_features.values())).shape[1]
     LOGGER.info(
         "HyperbolicProjection: Linear(%d \u2192 %d) + Lorentz expmap0 (k=%.2f). Output dim: %d.",
         in_dim, args.proj_dim, args.curvature, args.proj_dim + 1,
@@ -279,6 +282,14 @@ def main() -> None:
 
     for step in args.probe_steps:
         LOGGER.info("--- Training SVDD for denoising step %d ---", step)
+
+        # Fresh projector per step — reusing a trained projector across steps
+        # causes collapse because step-N weights bias step-(N+1) initialization.
+        projector = HyperbolicProjection(
+            in_dim=in_dim,
+            proj_dim=args.proj_dim,
+            curvature=args.curvature,
+        ).to(device)
 
         safe_tensor = torch.from_numpy(safe_features[step]).float().to(device)
         if not torch.isfinite(safe_tensor).all():
@@ -295,9 +306,11 @@ def main() -> None:
         )
 
         # 3. Train
+        unsafe_tensor = torch.from_numpy(unsafe_features[step]).float().to(device)
         train_svdd(
             svdd=svdd,
             safe_features=safe_tensor,
+            unsafe_features=unsafe_tensor,
             epochs=args.svdd_epochs,
             lr=args.svdd_lr,
             batch_size=args.svdd_batch_size,

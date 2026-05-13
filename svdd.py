@@ -77,8 +77,9 @@ def init_center(
         tangent[1:] = tangent[1:] * scale
 
     center = projector.manifold.expmap0(tangent.unsqueeze(0)).squeeze(0)  # [proj_dim + 1]
-    LOGGER.info("Center initialized. Lorentz norm check: %.6f (should be ~1).",
-                float(-center[0] ** 2 + (center[1:] ** 2).sum()))
+    LOGGER.info("Center initialized. Lorentz norm check: %.6f (should be ~-1/k = %.6f).",
+                float(-center[0] ** 2 + (center[1:] ** 2).sum()),
+                -1.0 / float(projector.manifold.k))
     return center
 
 
@@ -115,12 +116,12 @@ class HyperbolicSVDD(nn.Module):
         # Center is fixed after initialization (not a learnable parameter)
         self.register_buffer("center", center)
 
-        # Radius R is learnable; initialized to 1
-        self.log_R = nn.Parameter(torch.zeros(1))   # R = exp(log_R) > 0
+        # Radius R is updated analytically after each epoch (not via gradient)
+        self.register_buffer("_R", torch.ones(1))
 
     @property
     def R(self) -> torch.Tensor:
-        return self.log_R.exp()
+        return self._R
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Map Euclidean features to the hyperboloid.
@@ -133,22 +134,37 @@ class HyperbolicSVDD(nn.Module):
         """
         return self.projector(x)
 
-    def loss(self, x: torch.Tensor) -> torch.Tensor:
-        """Soft-boundary SVDD loss over a batch of safe samples.
+    def loss(self, safe: torch.Tensor, unsafe: Optional[torch.Tensor] = None, unsafe_weight: float = 1.0) -> torch.Tensor:
+        """Contrastive SVDD loss.
+
+        Safe samples are pulled toward the center; unsafe samples are pushed
+        away from it.  Using both prevents hypersphere collapse.
 
         Args:
-            x: [batch, in_dim]  — should be safe samples only during training.
+            safe:          [batch, in_dim]  — safe samples.
+            unsafe:        [batch, in_dim]  — unsafe samples (optional).
+            unsafe_weight: Weight on the repulsion term.
 
         Returns:
             Scalar loss.
         """
-        embeddings = self.forward(x)                                    # [batch, proj_dim+1]
-        center = self.center.unsqueeze(0).expand_as(embeddings)
-        dist_sq = lorentz_distance(self.manifold, embeddings, center) ** 2  # [batch]
+        # Safe: penalize only samples *outside* the sphere (hinge on d² - R²)
+        safe_emb = self.forward(safe)
+        center = self.center.unsqueeze(0).expand_as(safe_emb)
+        safe_dist_sq = lorentz_distance(self.manifold, safe_emb, center) ** 2
+        R_sq = self._R.detach() ** 2
+        safe_loss = torch.clamp(safe_dist_sq - R_sq, min=0.0).mean() / self.nu
 
-        R_sq = self.R ** 2
-        penalty = torch.clamp(dist_sq - R_sq, min=0.0).mean()
-        return R_sq + penalty / self.nu
+        if unsafe is not None:
+            # Unsafe: maximize distance — penalize if unsafe falls inside (R + margin)
+            unsafe_emb = self.forward(unsafe)
+            center_u = self.center.unsqueeze(0).expand_as(unsafe_emb)
+            unsafe_dist_sq = lorentz_distance(self.manifold, unsafe_emb, center_u) ** 2
+            R_sq = self._R.detach() ** 2
+            repulsion = torch.clamp(R_sq - unsafe_dist_sq, min=0.0).mean()
+            return safe_loss + unsafe_weight * repulsion
+
+        return safe_loss
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor) -> torch.Tensor:
@@ -184,40 +200,61 @@ class HyperbolicSVDD(nn.Module):
 def train_svdd(
     svdd: HyperbolicSVDD,
     safe_features: torch.Tensor,
+    unsafe_features: Optional[torch.Tensor] = None,
     epochs: int = 50,
     lr: float = 1e-3,
     batch_size: int = 32,
+    unsafe_weight: float = 1.0,
     device: torch.device = torch.device("cpu"),
 ) -> None:
-    """Train the HyperbolicSVDD on safe features only.
+    """Train the HyperbolicSVDD with safe (and optionally unsafe) features.
 
     Args:
-        svdd:          HyperbolicSVDD module (projector + R).
-        safe_features: Euclidean mean-pooled safe hooks  [n_safe, in_dim].
-        epochs:        Number of training epochs.
-        lr:            Learning rate for Adam.
-        batch_size:    Mini-batch size.
-        device:        Torch device.
+        svdd:            HyperbolicSVDD module.
+        safe_features:   Safe hooks  [n_safe, in_dim].
+        unsafe_features: Unsafe hooks  [n_unsafe, in_dim]  — strongly recommended
+                         to prevent hypersphere collapse.
+        epochs:          Number of training epochs.
+        lr:              Learning rate for Adam.
+        batch_size:      Mini-batch size.
+        unsafe_weight:   Weight on the unsafe repulsion term.
+        device:          Torch device.
     """
     svdd = svdd.to(device)
     safe_features = safe_features.to(device)
+    if unsafe_features is not None:
+        unsafe_features = unsafe_features.to(device)
 
-    optimizer = torch.optim.Adam(svdd.parameters(), lr=lr)
-    n = safe_features.shape[0]
+    # Only optimize projector weights — R is updated analytically
+    optimizer = torch.optim.Adam(svdd.projector.parameters(), lr=lr)
+    n_safe = safe_features.shape[0]
+    n_unsafe = unsafe_features.shape[0] if unsafe_features is not None else 0
 
     svdd.train()
     for epoch in range(1, epochs + 1):
-        perm = torch.randperm(n, device=device)
+        safe_perm = torch.randperm(n_safe, device=device)
+        unsafe_perm = torch.randperm(n_unsafe, device=device) if n_unsafe > 0 else None
         epoch_loss = 0.0
         steps = 0
-        for start in range(0, n, batch_size):
-            batch = safe_features[perm[start:start + batch_size]]
+        for start in range(0, n_safe, batch_size):
+            safe_batch = safe_features[safe_perm[start:start + batch_size]]
+
+            unsafe_batch = None
+            if unsafe_perm is not None:
+                u_start = start % n_unsafe
+                unsafe_batch = unsafe_features[unsafe_perm[u_start:u_start + batch_size]]
+
             optimizer.zero_grad()
-            loss = svdd.loss(batch)
+            loss = svdd.loss(safe_batch, unsafe_batch, unsafe_weight=unsafe_weight)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
             steps += 1
+
+        # Update R analytically as the (1-nu) quantile of safe training distances
+        with torch.no_grad():
+            all_dists = svdd.predict(safe_features)
+            svdd._R.fill_(torch.quantile(all_dists, 1.0 - svdd.nu).item())
 
         if epoch % 10 == 0 or epoch == 1:
             LOGGER.info(
@@ -239,7 +276,7 @@ def save_checkpoint(svdd: HyperbolicSVDD, path: Path) -> None:
         {
             "projector_state": svdd.projector.state_dict(),
             "center": svdd.center.cpu(),
-            "log_R": svdd.log_R.data.cpu(),
+            "R": svdd._R.cpu(),
             "nu": svdd.nu,
             "in_dim": svdd.projector.linear.in_features,
             "proj_dim": svdd.projector.proj_dim,
@@ -260,7 +297,7 @@ def load_checkpoint(path: Path, device: torch.device = torch.device("cpu")) -> H
     )
     projector.load_state_dict(ckpt["projector_state"])
     svdd = HyperbolicSVDD(projector=projector, center=ckpt["center"].to(device), nu=ckpt["nu"])
-    svdd.log_R.data = ckpt["log_R"].to(device)
+    svdd._R.copy_(ckpt["R"].to(device))
     svdd.to(device)
     svdd.eval()
     LOGGER.info("Checkpoint loaded from %s. R=%.6f.", path, float(svdd.R))
