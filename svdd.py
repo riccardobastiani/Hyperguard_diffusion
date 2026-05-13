@@ -38,6 +38,7 @@ def init_center(
     projector: HyperbolicProjection,
     safe_features: torch.Tensor,
     eps: float = 0.1,
+    max_norm: float = 15.0,
 ) -> torch.Tensor:
     """Compute the initial SVDD center as the mean of safe hyperbolic embeddings.
 
@@ -57,6 +58,8 @@ def init_center(
     """
     projector.eval()
     embeddings = projector(safe_features)           # [n_safe, proj_dim + 1]
+    if not torch.isfinite(embeddings).all():
+        raise ValueError("Non-finite values in projected safe embeddings; check probe cache and projection.")
 
     # Average in the ambient Minkowski space then project back
     mean = embeddings.mean(dim=0)                   # [proj_dim + 1]
@@ -67,6 +70,11 @@ def init_center(
 
     if tangent[1:].norm() < eps:
         tangent[1:] = tangent[1:] + eps
+
+    if max_norm is not None:
+        norm = tangent[1:].norm().clamp_min(1e-6)
+        scale = min(max_norm / float(norm), 1.0)
+        tangent[1:] = tangent[1:] * scale
 
     center = projector.manifold.expmap0(tangent.unsqueeze(0)).squeeze(0)  # [proj_dim + 1]
     LOGGER.info("Center initialized. Lorentz norm check: %.6f (should be ~1).",

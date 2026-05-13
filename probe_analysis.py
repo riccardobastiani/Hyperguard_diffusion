@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--svdd-epochs", type=int, default=50, help="Number of SVDD training epochs.")
     parser.add_argument("--svdd-lr", type=float, default=1e-3, help="Learning rate for SVDD training.")
     parser.add_argument("--svdd-batch-size", type=int, default=32, help="Mini-batch size for SVDD training.")
+    parser.add_argument(
+        "--l2-normalize-probes",
+        action="store_true",
+        help="Apply per-sample L2 normalization to probe features before projection.",
+    )
     parser.add_argument("--max-prompt-length", type=int, default=512, help="Tokenizer truncation length.")
     parser.add_argument("--safe-local-path", type=Path, help="Optional local JSON/CSV file for safe prompts.")
     parser.add_argument("--safe-local-field", default="Refined_behavior", help="Field to read from --safe-local-path.")
@@ -143,6 +148,29 @@ def extract_layer_features(
     return {step: np.concatenate(chunks, axis=0) for step, chunks in step_buffers.items()}
 
 
+def _load_probe_cache(path: Path, probe_steps: Sequence[int]) -> Dict[int, np.ndarray]:
+    data = np.load(path)
+    loaded: Dict[int, np.ndarray] = {}
+    for step in probe_steps:
+        key = f"step_{step}"
+        if key not in data:
+            raise KeyError(f"Missing key '{key}' in {path}")
+        loaded[step] = data[key]
+    return loaded
+
+
+def _is_finite_probe_cache(probes: Dict[int, np.ndarray]) -> bool:
+    return all(np.isfinite(arr).all() for arr in probes.values())
+
+
+def _l2_normalize_features(features: Dict[int, np.ndarray], eps: float = 1e-6) -> Dict[int, np.ndarray]:
+    normalized: Dict[int, np.ndarray] = {}
+    for step, arr in features.items():
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        normalized[step] = arr / (norms + eps)
+    return normalized
+
+
 def main() -> None:
     args = parse_args()
     configure_logging()
@@ -180,35 +208,62 @@ def main() -> None:
     ).to(device).eval()
     ensure_llada_config_compat(model)
 
-    features_by_step = extract_layer_features(
-        model=model,
-        tokenizer=tokenizer,
-        prompts=prompts,
-        batch_size=args.batch_size,
-        device=device,
-        max_prompt_length=args.max_prompt_length,
-        steps=args.steps,
-        gen_length=args.gen_length,
-        block_length=args.block_length,
-        probe_steps=args.probe_steps,
-        layer_id=args.layer_id,
-    )
-    LOGGER.info(
-        "Extracted hooks for layer %d at steps %s — shapes: %s",
-        args.layer_id,
-        args.probe_steps,
-        {s: arr.shape for s, arr in features_by_step.items()},
-    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    safe_probe_path = args.output_dir / "safe_probes.npz"
+    unsafe_probe_path = args.output_dir / "unsafe_probes.npz"
 
-    labels_array = np.asarray(labels)
-    safe_mask = labels_array == 0
-    unsafe_mask = labels_array == 1
-    safe_features: Dict[int, np.ndarray] = {s: arr[safe_mask] for s, arr in features_by_step.items()}
-    unsafe_features: Dict[int, np.ndarray] = {s: arr[unsafe_mask] for s, arr in features_by_step.items()}
+    use_cache = safe_probe_path.exists() and unsafe_probe_path.exists()
+    if use_cache:
+        LOGGER.info("Loading cached probes from %s.", args.output_dir)
+        safe_features = _load_probe_cache(safe_probe_path, args.probe_steps)
+        unsafe_features = _load_probe_cache(unsafe_probe_path, args.probe_steps)
+        if not (_is_finite_probe_cache(safe_features) and _is_finite_probe_cache(unsafe_features)):
+            LOGGER.warning("Cached probes contain NaN/Inf; recomputing probes.")
+            use_cache = False
+
+    if not use_cache:
+        features_by_step = extract_layer_features(
+            model=model,
+            tokenizer=tokenizer,
+            prompts=prompts,
+            batch_size=args.batch_size,
+            device=device,
+            max_prompt_length=args.max_prompt_length,
+            steps=args.steps,
+            gen_length=args.gen_length,
+            block_length=args.block_length,
+            probe_steps=args.probe_steps,
+            layer_id=args.layer_id,
+        )
+        LOGGER.info(
+            "Extracted hooks for layer %d at steps %s — shapes: %s",
+            args.layer_id,
+            args.probe_steps,
+            {s: arr.shape for s, arr in features_by_step.items()},
+        )
+
+        labels_array = np.asarray(labels)
+        safe_mask = labels_array == 0
+        unsafe_mask = labels_array == 1
+        safe_features = {s: arr[safe_mask] for s, arr in features_by_step.items()}
+        unsafe_features = {s: arr[unsafe_mask] for s, arr in features_by_step.items()}
+
+        if args.l2_normalize_probes:
+            safe_features = _l2_normalize_features(safe_features)
+            unsafe_features = _l2_normalize_features(unsafe_features)
+
+        np.savez(safe_probe_path, **{f"step_{s}": arr for s, arr in safe_features.items()})
+        np.savez(unsafe_probe_path, **{f"step_{s}": arr for s, arr in unsafe_features.items()})
+        LOGGER.info("Saved cached probes to %s.", args.output_dir)
+
+    if args.l2_normalize_probes and use_cache:
+        safe_features = _l2_normalize_features(safe_features)
+        unsafe_features = _l2_normalize_features(unsafe_features)
+
     LOGGER.info(
         "Safe samples: %d, unsafe samples: %d.",
-        safe_mask.sum(),
-        unsafe_mask.sum(),
+        next(iter(safe_features.values())).shape[0],
+        next(iter(unsafe_features.values())).shape[0],
     )
 
     in_dim = getattr(model.config, "hidden_size", 4096)
@@ -222,12 +277,12 @@ def main() -> None:
         in_dim, args.proj_dim, args.curvature, args.proj_dim + 1,
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-
     for step in args.probe_steps:
         LOGGER.info("--- Training SVDD for denoising step %d ---", step)
 
         safe_tensor = torch.from_numpy(safe_features[step]).float().to(device)
+        if not torch.isfinite(safe_tensor).all():
+            raise ValueError(f"Safe probes for step {step} contain NaN/Inf; delete cache and recompute.")
 
         # 1. Initialize center from safe embeddings
         center = init_center(projector, safe_tensor)

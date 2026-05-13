@@ -17,6 +17,7 @@ STEPS="${STEPS:-64}"
 GEN_LENGTH="${GEN_LENGTH:-64}"
 BLOCK_LENGTH="${BLOCK_LENGTH:-64}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}"
+L2_NORMALIZE_PROBES="${L2_NORMALIZE_PROBES:-1}"
 
 # Projection + SVDD hyperparameters
 PROJ_DIM="${PROJ_DIM:-128}"
@@ -52,6 +53,10 @@ CMD=("${PYTHON}" probe_analysis.py \
 
 if [[ -n "${SAFE_LOCAL_PATH}" ]]; then
   CMD+=(--safe-local-path "${SAFE_LOCAL_PATH}")
+fi
+
+if [[ "${L2_NORMALIZE_PROBES}" == "1" ]]; then
+  CMD+=(--l2-normalize-probes)
 fi
 
 "${CMD[@]}"
