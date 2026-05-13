@@ -11,6 +11,7 @@ from transformers import AutoModel, AutoTokenizer
 from dataset import load_balanced_prompt_dataset, validate_labels
 from generate import ensure_llada_config_compat, generate_with_layer_probes, install_transformers_tied_weights_compat
 from hyperbolic_projection import HyperbolicProjection
+from svdd import HyperbolicSVDD, init_center, save_checkpoint, train_svdd
 
 
 LOGGER = logging.getLogger("probe_analysis")
@@ -32,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer-id", type=int, default=15, help="Transformer layer index to extract hooks from.")
     parser.add_argument("--proj-dim", type=int, default=128, help="Output dimension of the linear projection before hyperbolic mapping.")
     parser.add_argument("--curvature", type=float, default=1.0, help="Curvature k of the Lorentz manifold.")
+    parser.add_argument("--nu", type=float, default=0.1, help="SVDD soft-boundary parameter: fraction of training samples allowed outside the sphere.")
+    parser.add_argument("--svdd-epochs", type=int, default=50, help="Number of SVDD training epochs.")
+    parser.add_argument("--svdd-lr", type=float, default=1e-3, help="Learning rate for SVDD training.")
+    parser.add_argument("--svdd-batch-size", type=int, default=32, help="Mini-batch size for SVDD training.")
     parser.add_argument("--max-prompt-length", type=int, default=512, help="Tokenizer truncation length.")
     parser.add_argument("--safe-local-path", type=Path, help="Optional local JSON/CSV file for safe prompts.")
     parser.add_argument("--safe-local-field", default="Refined_behavior", help="Field to read from --safe-local-path.")
@@ -213,31 +218,42 @@ def main() -> None:
         curvature=args.curvature,
     ).to(device)
     LOGGER.info(
-        "HyperbolicProjection: Linear(%d → %d) + Lorentz expmap0 (k=%.2f). Output dim: %d.",
+        "HyperbolicProjection: Linear(%d \u2192 %d) + Lorentz expmap0 (k=%.2f). Output dim: %d.",
         in_dim, args.proj_dim, args.curvature, args.proj_dim + 1,
     )
 
-    safe_hyp: Dict[int, np.ndarray] = {}
-    unsafe_hyp: Dict[int, np.ndarray] = {}
-    with torch.no_grad():
-        for step in args.probe_steps:
-            safe_hyp[step] = projector(
-                torch.from_numpy(safe_features[step]).to(device)
-            ).cpu().numpy()
-            unsafe_hyp[step] = projector(
-                torch.from_numpy(unsafe_features[step]).to(device)
-            ).cpu().numpy()
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    np.savez(
-        args.output_dir / "safe_hyperbolic.npz",
-        **{f"step_{s}": arr for s, arr in safe_hyp.items()},
-    )
-    np.savez(
-        args.output_dir / "unsafe_hyperbolic.npz",
-        **{f"step_{s}": arr for s, arr in unsafe_hyp.items()},
-    )
-    LOGGER.info("Saved hyperbolic embeddings to %s.", args.output_dir.resolve())
+
+    for step in args.probe_steps:
+        LOGGER.info("--- Training SVDD for denoising step %d ---", step)
+
+        safe_tensor = torch.from_numpy(safe_features[step]).float().to(device)
+
+        # 1. Initialize center from safe embeddings
+        center = init_center(projector, safe_tensor)
+
+        # 2. Build SVDD
+        svdd = HyperbolicSVDD(
+            projector=projector,
+            center=center,
+            nu=args.nu,
+        )
+
+        # 3. Train
+        train_svdd(
+            svdd=svdd,
+            safe_features=safe_tensor,
+            epochs=args.svdd_epochs,
+            lr=args.svdd_lr,
+            batch_size=args.svdd_batch_size,
+            device=device,
+        )
+
+        # 4. Checkpoint
+        ckpt_path = args.output_dir / f"svdd_step_{step}.pt"
+        save_checkpoint(svdd, ckpt_path)
+
+    LOGGER.info("All checkpoints saved to %s.", args.output_dir.resolve())
 
 
 if __name__ == "__main__":
