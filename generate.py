@@ -437,6 +437,147 @@ def generate_with_layer_probes(model, prompt, attention_mask=None, steps=64, gen
     return x, probes
 
 
+# ---------------------------------------------------------------------------
+# Guarded generation: SVDD detector intercepts at each probe step
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def generate_with_guard(
+    model,
+    prompt,
+    detectors: dict,
+    layer_id: int,
+    attention_mask=None,
+    steps=64,
+    gen_length=64,
+    block_length=64,
+    temperature=0.,
+    cfg_scale=0.,
+    remasking='low_confidence',
+    mask_id=126336,
+):
+    """Run guarded generation: abort if any SVDD detector classifies input as unsafe.
+
+    Args:
+        model:      Mask predictor (LLaDA).
+        prompt:     Tokenized prompts  [batch, prompt_len].
+        detectors:  Dict mapping denoising step -> trained HyperbolicSVDD.
+                    e.g. {5: svdd_5, 10: svdd_10, 15: svdd_15}
+        layer_id:   Transformer layer index whose hidden state is fed to the detectors.
+        attention_mask: Optional  [batch, prompt_len].
+        steps, gen_length, block_length, temperature, cfg_scale, remasking, mask_id:
+                    Same as generate().
+
+    Returns:
+        (x, blocked, triggered_step) where:
+            x              — generated token tensor (prompt + generation) or prompt-only if blocked.
+            blocked        — True if generation was aborted by the detector.
+            triggered_step — The denoising step that fired, or None if not blocked.
+    """
+    probe_steps = sorted(detectors.keys())
+    probe_steps_set = set(probe_steps)
+    num_layers = getattr(model.config, "num_hidden_layers", 32)
+
+    x = torch.full(
+        (prompt.shape[0], prompt.shape[1] + gen_length), mask_id, dtype=torch.long
+    ).to(model.device)
+    x[:, :prompt.shape[1]] = prompt.clone()
+
+    if attention_mask is not None:
+        attention_mask = torch.cat(
+            [
+                attention_mask,
+                torch.ones(
+                    (prompt.shape[0], gen_length),
+                    dtype=attention_mask.dtype,
+                    device=model.device,
+                ),
+            ],
+            dim=-1,
+        )
+    prompt_index = (x != mask_id)
+
+    assert gen_length % block_length == 0
+    num_blocks = gen_length // block_length
+    assert steps % num_blocks == 0
+    steps_per_block = steps // num_blocks
+
+    global_step = 0
+
+    for num_block in range(num_blocks):
+        block_mask_index = (
+            x[:, prompt.shape[1] + num_block * block_length:
+               prompt.shape[1] + (num_block + 1) * block_length]
+            == mask_id
+        )
+        num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps_per_block)
+
+        for i in range(steps_per_block):
+            global_step += 1
+            capture_step = global_step in probe_steps_set
+            mask_index = (x == mask_id)
+
+            if cfg_scale > 0.:
+                un_x = x.clone()
+                un_x[prompt_index] = mask_id
+                x_ = torch.cat([x, un_x], dim=0)
+                attention_mask_ = (
+                    torch.cat([attention_mask, attention_mask], dim=0)
+                    if attention_mask is not None else None
+                )
+                capture_attention_mask = attention_mask
+                outputs = _model_forward(
+                    model, x_, attention_mask=attention_mask_,
+                    output_hidden_states=capture_step,
+                )
+                logits = _output_logits(outputs)
+                logits, un_logits = torch.chunk(logits, 2, dim=0)
+                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+            else:
+                capture_attention_mask = attention_mask
+                outputs = _model_forward(
+                    model, x, attention_mask=attention_mask,
+                    output_hidden_states=capture_step,
+                )
+                logits = _output_logits(outputs)
+
+            # --- Guard check ---
+            if capture_step:
+                step_probes = _capture_layer_probes(
+                    outputs, capture_attention_mask, prompt.shape[0],
+                    [layer_id], num_layers,
+                )
+                hook = step_probes[f"layer_{layer_id}"].to(model.device)  # [batch, hidden]
+                svdd = detectors[global_step]
+                is_unsafe = svdd.classify(hook)        # [batch] bool
+                if is_unsafe.any():
+                    return x, True, global_step
+
+            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+            x0 = torch.argmax(logits_with_noise, dim=-1)
+
+            if remasking == 'low_confidence':
+                p = F.softmax(logits, dim=-1)
+                x0_p = torch.squeeze(
+                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1)
+            elif remasking == 'random':
+                x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+            else:
+                raise NotImplementedError(remasking)
+
+            x0_p[:, prompt.shape[1] + (num_block + 1) * block_length:] = -np.inf
+            x0 = torch.where(mask_index, x0, x)
+            confidence = torch.where(mask_index, x0_p, -np.inf)
+
+            transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+            for j in range(confidence.shape[0]):
+                _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
+                transfer_index[j, select_index] = True
+            x[transfer_index] = x0[transfer_index]
+
+    return x, False, None
+
+
 def main():
     device = 'cuda'
 
