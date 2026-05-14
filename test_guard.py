@@ -15,6 +15,7 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
+import transformers
 
 from svdd import load_checkpoint, save_checkpoint
 
@@ -56,7 +57,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite svdd_step_*.pt with calibrated R (default saves new files).",
     )
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Device to run inference on (default: 'cuda' if available, else 'cpu').")
 
     # ------------------------------------------------------------------ #
     # HuggingFace live-inference mode                                      #
@@ -175,9 +177,76 @@ def load_hf_test_prompts(
     return safe_prompts, unsafe_prompts
 
 
+def model_dtype(device: torch.device):
+    if device.type == "cuda":
+        return torch.bfloat16
+    return torch.float32
+def apply_transformers_attribute_patch():
+    """
+    Fixes AttributeError: 'LLaDAModelLM' object has no attribute 'all_tied_weights_keys'
+    by patching the transformers utility function before it's called.
+    """
+    from transformers.modeling_utils import get_total_byte_count
+    
+    # Check if already patched
+    if hasattr(transformers.modeling_utils, "_is_patched_for_llada"):
+        return
+
+    original_get_total_byte_count = transformers.modeling_utils.get_total_byte_count
+
+    def patched_get_total_byte_count(model, accelerator_device_map, hf_quantizer):
+        if not hasattr(model, "all_tied_weights_keys"):
+            # LLaDA doesn't implement this, so we provide an empty fallback
+            # so the library doesn't crash.
+            model.all_tied_weights_keys = {}
+        return original_get_total_byte_count(model, accelerator_device_map, hf_quantizer)
+
+    transformers.modeling_utils.get_total_byte_count = patched_get_total_byte_count
+    transformers.modeling_utils._is_patched_for_llada = True
+    LOGGER.info("Applied transformers tied_weights attribute patch.")
+
+def load_llada_assets(model_name: str, device: torch.device):
+    from transformers import AutoModel, AutoTokenizer
+    from generate import ensure_llada_config_compat, install_transformers_tied_weights_compat
+
+    # 1. Apply both patches
+    install_transformers_tied_weights_compat()
+    apply_transformers_attribute_patch()
+
+    LOGGER.info("Loading tokenizer from %s …", model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.padding_side != "left":
+        tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id == 126336:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    LOGGER.info("Loading model from %s …", model_name)
+    
+    # 2. Use device_map to avoid RAM spike, but keep it simple
+    # to avoid complex sharding logic that might trigger more bugs
+    load_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": model_dtype(device),
+        "low_cpu_mem_usage": True,
+    }
+    
+    if device.type == "cuda":
+        # Using a fixed map instead of "auto" often bypasses 
+        # some of the heavy 'warmup' logic that causes the crash.
+        load_kwargs["device_map"] = {"": device.index if device.index is not None else 0}
+    
+    model = AutoModel.from_pretrained(model_name, **load_kwargs)
+    
+    # 3. Final model setup
+    model.eval()
+    ensure_llada_config_compat(model)
+    return model, tokenizer
+
+
 def extract_features_from_prompts(
     prompts: Sequence[str],
-    model_name: str,
+    model,
+    tokenizer,
     layer_id: int,
     probe_steps: List[int],
     batch_size: int,
@@ -186,31 +255,10 @@ def extract_features_from_prompts(
     block_length: int,
     max_prompt_length: int,
     device: torch.device,
+    l2_normalize: bool = True,  # Added this parameter
 ) -> Dict[int, np.ndarray]:
-    """Load LLaDA and return mean-pooled hidden states per probe step."""
-    from transformers import AutoModel, AutoTokenizer
-    from generate import (
-        ensure_llada_config_compat,
-        generate_with_layer_probes,
-        install_transformers_tied_weights_compat,
-    )
-
-    install_transformers_tied_weights_compat()
-
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-
-    LOGGER.info("Loading tokenizer from %s …", model_name)
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    LOGGER.info("Loading model from %s …", model_name)
-    model = AutoModel.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        torch_dtype=dtype,
-    )
-    ensure_llada_config_compat(model)
-    model = model.to(device)
-    model.eval()
+    """Return mean-pooled hidden states per probe step, optionally L2 normalized."""
+    from generate import generate_with_layer_probes
 
     # Format with chat template when available
     formatted: List[str] = []
@@ -259,13 +307,29 @@ def extract_features_from_prompts(
             )
 
         for s in probe_steps:
-            step_buffers[s].append(probes[s][f"layer_{layer_id}"].numpy())
+            # Move to CPU and convert to numpy immediately to save GPU RAM
+            step_buffers[s].append(probes[s][f"layer_{layer_id}"].cpu().numpy())
 
         del input_ids, attention_mask, encoded, probes
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-    return {s: np.concatenate(chunks, axis=0) for s, chunks in step_buffers.items()}
+    # --- NEW NORMALIZATION LOGIC ---
+    results = {}
+    for s in probe_steps:
+        # 1. Concatenate all batches for this step
+        arr = np.concatenate(step_buffers[s], axis=0)
+        
+        # 2. Apply L2 normalization if requested
+        if l2_normalize:
+            # Calculate Euclidean norm per sample (axis=1)
+            # Add a small epsilon (1e-6) to prevent division by zero
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            arr = arr / (norms + 1e-6)
+            
+        results[s] = arr
+
+    return results
 
 
 def main() -> None:
@@ -287,8 +351,10 @@ def main() -> None:
             seed=args.seed,
         )
 
+        model, tokenizer = load_llada_assets(args.model_name, device)
         common_kwargs = dict(
-            model_name=args.model_name,
+            model=model,
+            tokenizer=tokenizer,
             layer_id=args.layer_id,
             probe_steps=args.probe_steps,
             batch_size=args.batch_size,
