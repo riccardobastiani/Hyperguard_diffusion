@@ -1,18 +1,30 @@
 """
-Evaluate trained SVDD detectors using the already-extracted probe activations
-(probe_outputs/layer_23/safe_probes.npz and unsafe_probes.npz).
-No model loading or dataset download required.
+Evaluate trained SVDD detectors using either:
+  - pre-extracted probe activations (probe_outputs/layer_23/safe_probes.npz /
+    unsafe_probes.npz), or
+  - fresh activations extracted on-the-fly from the HuggingFace test set at
+    saralazza/llada-safety-dataset.
+
+Pass --hf-test to enable live inference.  All other flags are compatible with
+both modes.
 """
 import argparse
+import logging
 from pathlib import Path
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from svdd import load_checkpoint, save_checkpoint
 
+LOGGER = logging.getLogger("test_guard")
+
 PROBE_STEPS = [5]
 CKPT_DIR = Path("probe_outputs/layer_23")
+DEFAULT_MODEL_NAME = "GSAI-ML/LLaDA-8B-Instruct"
+SAFETY_DATASET = "saralazza/llada-safety-dataset"
+SAFE_SOURCE = "alpaca"
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,28 +57,279 @@ def parse_args() -> argparse.Namespace:
         help="Overwrite svdd_step_*.pt with calibrated R (default saves new files).",
     )
     parser.add_argument("--device", default="cpu")
+
+    # ------------------------------------------------------------------ #
+    # HuggingFace live-inference mode                                      #
+    # ------------------------------------------------------------------ #
+    parser.add_argument(
+        "--hf-test",
+        action="store_true",
+        help=(
+            "Download test samples from saralazza/llada-safety-dataset, run "
+            "the LLaDA model and evaluate on fresh probe features instead of "
+            "the cached .npz files."
+        ),
+    )
+    parser.add_argument(
+        "--hf-split",
+        default="test",
+        help="Dataset split to use in HF mode (default: 'test').",
+    )
+    parser.add_argument(
+        "--samples-per-class",
+        type=int,
+        default=50,
+        help="Number of safe and unsafe samples to draw in HF mode.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for HF-mode dataset shuffling.",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=DEFAULT_MODEL_NAME,
+        help="HuggingFace model id used for probe extraction in HF mode.",
+    )
+    parser.add_argument(
+        "--layer-id",
+        type=int,
+        default=23,
+        help="Transformer layer index to extract hooks from (must match checkpoint).",
+    )
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Prompt batch size for LLaDA inference in HF mode.")
+    parser.add_argument("--steps", type=int, default=64,
+                        help="Total denoising steps for LLaDA in HF mode.")
+    parser.add_argument("--gen-length", type=int, default=64,
+                        help="Generated mask-token length in HF mode.")
+    parser.add_argument("--block-length", type=int, default=64,
+                        help="LLaDA denoising block length in HF mode.")
+    parser.add_argument("--max-prompt-length", type=int, default=512,
+                        help="Tokenizer truncation length in HF mode.")
     return parser.parse_args()
 
 
+def _resolve_split(dataset_dict, preferred: str):
+    """Return the preferred split or the first available one."""
+    if preferred in dataset_dict:
+        return dataset_dict[preferred]
+    fallback = next(iter(dataset_dict.keys()))
+    LOGGER.warning("Split '%s' not found; falling back to '%s'.", preferred, fallback)
+    return dataset_dict[fallback]
+
+
+def _collect(dataset, text_fn, n: int) -> List[str]:
+    prompts: List[str] = []
+    for row in dataset:
+        text = (text_fn(row) or "").strip()
+        if text:
+            prompts.append(text)
+        if len(prompts) == n:
+            break
+    if len(prompts) < n:
+        LOGGER.warning("Only %d/%d prompts available.", len(prompts), n)
+    return prompts
+
+
+def load_hf_test_prompts(
+    split: str,
+    samples_per_class: int,
+    seed: int,
+) -> Tuple[List[str], List[str]]:
+    """Return (safe_prompts, unsafe_prompts) from the HuggingFace test set."""
+    from datasets import load_dataset as hf_load
+
+    LOGGER.info("Downloading dataset %s …", SAFETY_DATASET)
+    ds_dict = hf_load(SAFETY_DATASET)
+    ds = _resolve_split(ds_dict, split).shuffle(seed=seed)
+
+    safe_ds = ds.filter(
+        lambda r: (r.get("source_dataset") or "").strip().lower() == SAFE_SOURCE
+    )
+    unsafe_ds = ds.filter(
+        lambda r: (r.get("source_dataset") or "").strip().lower() != SAFE_SOURCE
+    )
+
+    def _safe_text(row) -> str:
+        for field in ("refined_behavior", "behavior", "instruction"):
+            v = (row.get(field) or "").strip()
+            if v:
+                return v
+        inp = (row.get("input") or "").strip()
+        return inp
+
+    def _unsafe_text(row) -> str:
+        for field in ("refined_behavior", "prompt", "behavior", "instruction"):
+            v = (row.get(field) or "").strip()
+            if v:
+                return v
+        return (row.get("input") or "").strip()
+
+    safe_prompts   = _collect(safe_ds,   _safe_text,   samples_per_class)
+    unsafe_prompts = _collect(unsafe_ds, _unsafe_text, samples_per_class)
+
+    LOGGER.info("Collected %d safe / %d unsafe prompts from split '%s'.",
+                len(safe_prompts), len(unsafe_prompts), split)
+    return safe_prompts, unsafe_prompts
+
+
+def extract_features_from_prompts(
+    prompts: Sequence[str],
+    model_name: str,
+    layer_id: int,
+    probe_steps: List[int],
+    batch_size: int,
+    steps: int,
+    gen_length: int,
+    block_length: int,
+    max_prompt_length: int,
+    device: torch.device,
+) -> Dict[int, np.ndarray]:
+    """Load LLaDA and return mean-pooled hidden states per probe step."""
+    from transformers import AutoModel, AutoTokenizer
+    from generate import (
+        ensure_llada_config_compat,
+        generate_with_layer_probes,
+        install_transformers_tied_weights_compat,
+    )
+
+    install_transformers_tied_weights_compat()
+
+    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+
+    LOGGER.info("Loading tokenizer from %s …", model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    LOGGER.info("Loading model from %s …", model_name)
+    model = AutoModel.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+    )
+    ensure_llada_config_compat(model)
+    model = model.to(device)
+    model.eval()
+
+    # Format with chat template when available
+    formatted: List[str] = []
+    if hasattr(tokenizer, "apply_chat_template"):
+        for p in prompts:
+            formatted.append(
+                tokenizer.apply_chat_template(
+                    [{"role": "user", "content": p}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+            )
+    else:
+        formatted = list(prompts)
+
+    step_buffers: Dict[int, list] = {s: [] for s in probe_steps}
+
+    for i in range(0, len(formatted), batch_size):
+        batch = formatted[i : i + batch_size]
+        LOGGER.info("Extracting probes batch %d-%d / %d …",
+                    i + 1, i + len(batch), len(formatted))
+        encoded = tokenizer(
+            batch,
+            add_special_tokens=False,
+            padding=True,
+            truncation=True,
+            max_length=max_prompt_length,
+            return_tensors="pt",
+        )
+        input_ids      = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+
+        with torch.no_grad():
+            _, probes = generate_with_layer_probes(
+                model,
+                input_ids,
+                attention_mask=attention_mask,
+                steps=steps,
+                gen_length=gen_length,
+                block_length=block_length,
+                temperature=0.0,
+                cfg_scale=0.0,
+                remasking="low_confidence",
+                probe_steps=probe_steps,
+                layer_ids=[layer_id],
+            )
+
+        for s in probe_steps:
+            step_buffers[s].append(probes[s][f"layer_{layer_id}"].numpy())
+
+        del input_ids, attention_mask, encoded, probes
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    return {s: np.concatenate(chunks, axis=0) for s, chunks in step_buffers.items()}
+
+
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
     args = parse_args()
     device = torch.device(args.device)
 
-    safe_path   = args.ckpt_dir / "safe_probes.npz"
-    unsafe_path = args.ckpt_dir / "unsafe_probes.npz"
-
-    if not safe_path.exists() or not unsafe_path.exists():
-        raise FileNotFoundError(
-            f"Probe cache not found in {args.ckpt_dir}. "
-            "Run probe_analysis.py first to extract and save activations."
+    # ------------------------------------------------------------------
+    # Acquire probe features — either from .npz cache or live HF inference
+    # ------------------------------------------------------------------
+    if args.hf_test:
+        safe_prompts, unsafe_prompts = load_hf_test_prompts(
+            split=args.hf_split,
+            samples_per_class=args.samples_per_class,
+            seed=args.seed,
         )
 
-    safe_data   = np.load(safe_path)
-    unsafe_data = np.load(unsafe_path)
+        common_kwargs = dict(
+            model_name=args.model_name,
+            layer_id=args.layer_id,
+            probe_steps=args.probe_steps,
+            batch_size=args.batch_size,
+            steps=args.steps,
+            gen_length=args.gen_length,
+            block_length=args.block_length,
+            max_prompt_length=args.max_prompt_length,
+            device=device,
+        )
 
-    print(f"Loaded probe cache from {args.ckpt_dir}")
-    print(f"  safe  keys: {list(safe_data.keys())}")
-    print(f"  unsafe keys: {list(unsafe_data.keys())}\n")
+        LOGGER.info("Extracting probe features for %d safe prompts …", len(safe_prompts))
+        safe_features = extract_features_from_prompts(safe_prompts, **common_kwargs)
+
+        LOGGER.info("Extracting probe features for %d unsafe prompts …", len(unsafe_prompts))
+        unsafe_features = extract_features_from_prompts(unsafe_prompts, **common_kwargs)
+
+        # Wrap as {key: array} dicts keyed by "step_N" to reuse the loop below
+        safe_data   = {f"step_{s}": safe_features[s]   for s in args.probe_steps}
+        unsafe_data = {f"step_{s}": unsafe_features[s] for s in args.probe_steps}
+
+        print(f"\nUsing HuggingFace test data from '{SAFETY_DATASET}' (split='{args.hf_split}')")
+        print(f"  safe samples : {len(safe_prompts)}")
+        print(f"  unsafe samples: {len(unsafe_prompts)}\n")
+
+    else:
+        safe_path   = args.ckpt_dir / "safe_probes.npz"
+        unsafe_path = args.ckpt_dir / "unsafe_probes.npz"
+
+        if not safe_path.exists() or not unsafe_path.exists():
+            raise FileNotFoundError(
+                f"Probe cache not found in {args.ckpt_dir}. "
+                "Run probe_analysis.py first to extract and save activations, "
+                "or pass --hf-test to run live inference."
+            )
+
+        safe_data   = np.load(safe_path)
+        unsafe_data = np.load(unsafe_path)
+
+        print(f"Loaded probe cache from {args.ckpt_dir}")
+        print(f"  safe  keys: {list(safe_data.keys())}")
+        print(f"  unsafe keys: {list(unsafe_data.keys())}\n")
 
     overall_correct = 0
     overall_total   = 0
