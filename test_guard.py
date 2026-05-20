@@ -427,7 +427,7 @@ def main() -> None:
             safe_feat = torch.from_numpy(safe_arr).float().to(device)
             safe_dist = svdd.predict(safe_feat).cpu().numpy()
             new_R = float(np.quantile(safe_dist, args.calibrate_quantile))
-            svdd._R.fill_(new_R)
+            svdd.set_radius(new_R)
             out_path = ckpt if args.overwrite_checkpoints else ckpt.with_name(f"svdd_step_{step}_calib.pt")
             save_checkpoint(svdd, out_path)
             print(f"[step {step}] Calibrated R to {new_R:.6f} (quantile={args.calibrate_quantile}) -> {out_path}")

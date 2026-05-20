@@ -1,14 +1,20 @@
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import geoopt
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from hyperbolic_projection import HyperbolicProjection
 
 LOGGER = logging.getLogger("svdd")
+
+
+def _inverse_softplus(x: torch.Tensor) -> torch.Tensor:
+    """Numerically stable inverse of softplus for positive tensors."""
+    return x + torch.log(-torch.expm1(-x))
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +104,8 @@ class HyperbolicSVDD(nn.Module):
     Args:
         projector:  HyperbolicProjection that maps hooks to the hyperboloid.
         center:     Fixed center on the hyperboloid  [proj_dim + 1].
-        nu:         Fraction of training samples allowed outside the sphere
-                    (controls the trade-off between volume and outliers). (0, 1].
+        nu:         Soft-boundary weight. Smaller values penalize safe samples
+                    outside the sphere more strongly. (0, 1].
     """
 
     def __init__(
@@ -107,21 +113,39 @@ class HyperbolicSVDD(nn.Module):
         projector: HyperbolicProjection,
         center: torch.Tensor,
         nu: float = 0.1,
+        initial_R: float = 1.0,
+        radius_eps: float = 1e-6,
     ):
         super().__init__()
+        if not 0.0 < nu <= 1.0:
+            raise ValueError("nu must be in the interval (0, 1].")
+        if initial_R <= 0.0:
+            raise ValueError("initial_R must be positive.")
+
         self.projector = projector
         self.manifold = projector.manifold
         self.nu = nu
+        self.radius_eps = radius_eps
 
         # Center is fixed after initialization (not a learnable parameter)
         self.register_buffer("center", center)
 
-        # Radius R is updated analytically after each epoch (not via gradient)
-        self.register_buffer("_R", torch.ones(1))
+        # Radius R is optimized jointly with the projector.  The raw parameter
+        # is transformed through softplus so the exposed radius stays positive.
+        initial_radius = torch.tensor([initial_R], dtype=center.dtype, device=center.device)
+        raw_radius = _inverse_softplus((initial_radius - radius_eps).clamp_min(1e-12))
+        self._log_R = nn.Parameter(raw_radius)
 
     @property
     def R(self) -> torch.Tensor:
-        return self._R
+        return F.softplus(self._log_R) + self.radius_eps
+
+    @torch.no_grad()
+    def set_radius(self, value: Union[float, torch.Tensor]) -> None:
+        """Set R while preserving the positive softplus parameterization."""
+        radius = torch.as_tensor(value, dtype=self._log_R.dtype, device=self._log_R.device).reshape_as(self._log_R)
+        raw_radius = _inverse_softplus((radius - self.radius_eps).clamp_min(1e-12))
+        self._log_R.copy_(raw_radius)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Map Euclidean features to the hyperboloid.
@@ -148,23 +172,23 @@ class HyperbolicSVDD(nn.Module):
         Returns:
             Scalar loss.
         """
-        # Safe: penalize only samples *outside* the sphere (hinge on d² - R²)
+        # Safe: minimize hypersphere volume and penalize samples outside it.
         safe_emb = self.forward(safe)
         center = self.center.unsqueeze(0).expand_as(safe_emb)
         safe_dist_sq = lorentz_distance(self.manifold, safe_emb, center) ** 2
-        R_sq = self._R.detach() ** 2
+        R_sq = self.R ** 2
         safe_loss = torch.clamp(safe_dist_sq - R_sq, min=0.0).mean() / self.nu
+        loss = R_sq.squeeze() + safe_loss
 
         if unsafe is not None:
-            # Unsafe: maximize distance — penalize if unsafe falls inside (R + margin)
+            # Unsafe: maximize distance by penalizing unsafe samples inside R.
             unsafe_emb = self.forward(unsafe)
             center_u = self.center.unsqueeze(0).expand_as(unsafe_emb)
             unsafe_dist_sq = lorentz_distance(self.manifold, unsafe_emb, center_u) ** 2
-            R_sq = self._R.detach() ** 2
             repulsion = torch.clamp(R_sq - unsafe_dist_sq, min=0.0).mean()
-            return safe_loss + unsafe_weight * repulsion
+            return loss + unsafe_weight * repulsion
 
-        return safe_loss
+        return loss
 
     @torch.no_grad()
     def predict(self, x: torch.Tensor) -> torch.Tensor:
@@ -225,8 +249,7 @@ def train_svdd(
     if unsafe_features is not None:
         unsafe_features = unsafe_features.to(device)
 
-    # Only optimize projector weights — R is updated analytically
-    optimizer = torch.optim.Adam(svdd.projector.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(list(svdd.projector.parameters()) + [svdd._log_R], lr=lr)
     n_safe = safe_features.shape[0]
     n_unsafe = unsafe_features.shape[0] if unsafe_features is not None else 0
 
@@ -251,15 +274,10 @@ def train_svdd(
             epoch_loss += loss.item()
             steps += 1
 
-        # Update R analytically as the (1-nu) quantile of safe training distances
-        with torch.no_grad():
-            all_dists = svdd.predict(safe_features)
-            svdd._R.fill_(torch.quantile(all_dists, 1.0 - svdd.nu).item())
-
         if epoch % 10 == 0 or epoch == 1:
             LOGGER.info(
                 "Epoch %d/%d — loss: %.6f  R: %.6f",
-                epoch, epochs, epoch_loss / steps, float(svdd.R),
+                epoch, epochs, epoch_loss / steps, float(svdd.R.detach()),
             )
 
     svdd.eval()
@@ -276,7 +294,9 @@ def save_checkpoint(svdd: HyperbolicSVDD, path: Path) -> None:
         {
             "projector_state": svdd.projector.state_dict(),
             "center": svdd.center.cpu(),
-            "R": svdd._R.cpu(),
+            "R": svdd.R.detach().cpu(),
+            "log_R": svdd._log_R.detach().cpu(),
+            "radius_eps": svdd.radius_eps,
             "nu": svdd.nu,
             "in_dim": svdd.projector.linear.in_features,
             "proj_dim": svdd.projector.proj_dim,
@@ -296,9 +316,18 @@ def load_checkpoint(path: Path, device: torch.device = torch.device("cpu")) -> H
         curvature=ckpt["curvature"],
     )
     projector.load_state_dict(ckpt["projector_state"])
-    svdd = HyperbolicSVDD(projector=projector, center=ckpt["center"].to(device), nu=ckpt["nu"])
-    svdd._R.copy_(ckpt["R"].to(device))
+    svdd = HyperbolicSVDD(
+        projector=projector,
+        center=ckpt["center"].to(device),
+        nu=ckpt["nu"],
+        initial_R=float(torch.as_tensor(ckpt.get("R", 1.0)).reshape(-1)[0]),
+        radius_eps=ckpt.get("radius_eps", 1e-6),
+    )
+    if "log_R" in ckpt:
+        svdd._log_R.data.copy_(ckpt["log_R"].to(device).reshape_as(svdd._log_R))
+    elif "R" in ckpt:
+        svdd.set_radius(ckpt["R"].to(device))
     svdd.to(device)
     svdd.eval()
-    LOGGER.info("Checkpoint loaded from %s. R=%.6f.", path, float(svdd.R))
+    LOGGER.info("Checkpoint loaded from %s. R=%.6f.", path, float(svdd.R.detach()))
     return svdd
