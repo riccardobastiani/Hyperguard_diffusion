@@ -1,17 +1,17 @@
 """
 Evaluate trained SVDD detectors using either:
-  - pre-extracted probe activations (probe_outputs/layer_23/safe_probes.npz /
-    unsafe_probes.npz), or
   - fresh activations extracted on-the-fly from the HuggingFace test set at
-    saralazza/llada-safety-dataset.
+    saralazza/llada-safety-dataset (default), or
+  - pre-extracted probe activations (probe_outputs/layer_23/safe_probes.npz /
+    unsafe_probes.npz).
 
-Pass --hf-test to enable live inference.  All other flags are compatible with
-both modes.
+Pass --cached-probes to use cached probe files instead. All other flags are
+compatible with both modes.
 """
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -28,6 +28,10 @@ SAFETY_DATASET = "saralazza/llada-safety-dataset"
 SAFE_SOURCE = "alpaca"
 
 
+def _rate(numerator: int, denominator: int) -> float:
+    return 100.0 * numerator / denominator if denominator else 0.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt-dir", type=Path, default=CKPT_DIR,
@@ -39,12 +43,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-all-unsafe",
         action="store_true",
+        default=True,
         help="Evaluate all unsafe samples and report block rate and distance stats.",
     )
     parser.add_argument(
         "--eval-all-safe",
         action="store_true",
+        default=True,
         help="Evaluate all safe samples and report block rate and distance stats.",
+    )
+    parser.add_argument(
+        "--single-sample",
+        action="store_true",
+        help="Evaluate only --sample-idx from each class instead of all samples.",
     )
     parser.add_argument(
         "--calibrate-quantile",
@@ -66,11 +77,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hf-test",
         action="store_true",
+        default=True,
         help=(
             "Download test samples from saralazza/llada-safety-dataset, run "
             "the LLaDA model and evaluate on fresh probe features instead of "
             "the cached .npz files."
         ),
+    )
+    parser.add_argument(
+        "--cached-probes",
+        action="store_false",
+        dest="hf_test",
+        help="Use cached safe_probes.npz / unsafe_probes.npz instead of HuggingFace test data.",
     )
     parser.add_argument(
         "--hf-split",
@@ -80,8 +98,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--samples-per-class",
         type=int,
-        default=50,
-        help="Number of safe and unsafe samples to draw in HF mode.",
+        default=None,
+        help="Number of safe and unsafe samples to draw in HF mode (default: all available).",
     )
     parser.add_argument(
         "--seed",
@@ -122,22 +140,22 @@ def _resolve_split(dataset_dict, preferred: str):
     return dataset_dict[fallback]
 
 
-def _collect(dataset, text_fn, n: int) -> List[str]:
+def _collect(dataset, text_fn, n: Optional[int]) -> List[str]:
     prompts: List[str] = []
     for row in dataset:
         text = (text_fn(row) or "").strip()
         if text:
             prompts.append(text)
-        if len(prompts) == n:
+        if n is not None and len(prompts) == n:
             break
-    if len(prompts) < n:
+    if n is not None and len(prompts) < n:
         LOGGER.warning("Only %d/%d prompts available.", len(prompts), n)
     return prompts
 
 
 def load_hf_test_prompts(
     split: str,
-    samples_per_class: int,
+    samples_per_class: Optional[int],
     seed: int,
 ) -> Tuple[List[str], List[str]]:
     """Return (safe_prompts, unsafe_prompts) from the HuggingFace test set."""
@@ -339,6 +357,9 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
     args = parse_args()
+    if args.single_sample:
+        args.eval_all_safe = False
+        args.eval_all_unsafe = False
     device = torch.device(args.device)
 
     # ------------------------------------------------------------------
@@ -399,9 +420,11 @@ def main() -> None:
 
     overall_correct = 0
     overall_total   = 0
-    unsafe_blocked_total = 0
+    unsafe_blocked_total = 0  # TP: unsafe prompt correctly stopped
+    unsafe_allowed_total = 0  # FN: unsafe prompt allowed to pass
     unsafe_total = 0
-    safe_blocked_total = 0
+    safe_blocked_total = 0    # FP: safe prompt incorrectly stopped
+    safe_allowed_total = 0    # TN: safe prompt correctly allowed
     safe_total = 0
 
     for step in args.probe_steps:
@@ -440,32 +463,44 @@ def main() -> None:
             print(f"[step {step}] Using calibrated R={R:.4f} for evaluation")
 
         if args.eval_all_unsafe or args.eval_all_safe:
-            if args.eval_all_safe:
-                safe_feat = torch.from_numpy(safe_arr).float().to(device)
-                safe_dist = svdd.predict(safe_feat).cpu().numpy()
-                safe_blocked = safe_dist > R
-                blocked_count = int(safe_blocked.sum())
-                total_count = safe_blocked.size
-                safe_blocked_total += blocked_count
-                safe_total += total_count
-                print(f"=== Step {step} | R={R:.4f} ===")
-                print(f"  safe block rate: {blocked_count}/{total_count} ({100 * blocked_count / total_count:.1f}%)")
-                print(
-                    f"  safe dist stats: min={safe_dist.min():.4f} "
-                    f"mean={safe_dist.mean():.4f} max={safe_dist.max():.4f}"
-                )
+            safe_feat = torch.from_numpy(safe_arr).float().to(device)
+            safe_dist = svdd.predict(safe_feat).cpu().numpy()
+            safe_blocked = safe_dist > R
+            fp_count = int(safe_blocked.sum())
+            tn_count = int((~safe_blocked).sum())
+            safe_count = safe_blocked.size
 
             unsafe_feat = torch.from_numpy(unsafe_arr).float().to(device)
             unsafe_dist = svdd.predict(unsafe_feat).cpu().numpy()
             unsafe_blocked = unsafe_dist > R
-            blocked_count = int(unsafe_blocked.sum())
-            total_count = unsafe_blocked.size
-            unsafe_blocked_total += blocked_count
-            unsafe_total += total_count
+            tp_count = int(unsafe_blocked.sum())
+            fn_count = int((~unsafe_blocked).sum())
+            unsafe_count = unsafe_blocked.size
+
+            safe_blocked_total += fp_count
+            safe_allowed_total += tn_count
+            safe_total += safe_count
+            unsafe_blocked_total += tp_count
+            unsafe_allowed_total += fn_count
+            unsafe_total += unsafe_count
+
+            print(f"=== Step {step} | R={R:.4f} ===")
+            print(f"  TP unsafe blocked: {tp_count}/{unsafe_count} ({_rate(tp_count, unsafe_count):.1f}%)")
+            print(f"  FN unsafe allowed: {fn_count}/{unsafe_count} ({_rate(fn_count, unsafe_count):.1f}%)")
+            print(f"  TN safe allowed:   {tn_count}/{safe_count} ({_rate(tn_count, safe_count):.1f}%)")
+            print(f"  FP safe blocked:   {fp_count}/{safe_count} ({_rate(fp_count, safe_count):.1f}%)")
+            print(
+                f"  rates: TPR={_rate(tp_count, unsafe_count):.1f}% "
+                f"FNR={_rate(fn_count, unsafe_count):.1f}% "
+                f"TNR={_rate(tn_count, safe_count):.1f}% "
+                f"FPR={_rate(fp_count, safe_count):.1f}%"
+            )
+            if args.eval_all_safe:
+                print(
+                    f"  safe dist stats: min={safe_dist.min():.4f} "
+                    f"mean={safe_dist.mean():.4f} max={safe_dist.max():.4f}"
+                )
             if args.eval_all_unsafe:
-                if not args.eval_all_safe:
-                    print(f"=== Step {step} | R={R:.4f} ===")
-                print(f"  unsafe block rate: {blocked_count}/{total_count} ({100 * blocked_count / total_count:.1f}%)")
                 print(
                     f"  unsafe dist stats: min={unsafe_dist.min():.4f} "
                     f"mean={unsafe_dist.mean():.4f} max={unsafe_dist.max():.4f}"
@@ -493,12 +528,18 @@ def main() -> None:
         overall_correct += int(not safe_blocked) + int(unsafe_blocked)
         overall_total   += 2
 
-    if args.eval_all_safe and safe_total > 0:
-        rate = 100 * safe_blocked_total / safe_total
-        print(f"Safe block rate across steps: {safe_blocked_total}/{safe_total} ({rate:.1f}%)")
-    if args.eval_all_unsafe and unsafe_total > 0:
-        rate = 100 * unsafe_blocked_total / unsafe_total
-        print(f"Unsafe block rate across steps: {unsafe_blocked_total}/{unsafe_total} ({rate:.1f}%)")
+    if (args.eval_all_safe or args.eval_all_unsafe) and safe_total > 0 and unsafe_total > 0:
+        print("Confusion matrix across steps:")
+        print(f"  TP unsafe blocked: {unsafe_blocked_total}/{unsafe_total} ({_rate(unsafe_blocked_total, unsafe_total):.1f}%)")
+        print(f"  FN unsafe allowed: {unsafe_allowed_total}/{unsafe_total} ({_rate(unsafe_allowed_total, unsafe_total):.1f}%)")
+        print(f"  TN safe allowed:   {safe_allowed_total}/{safe_total} ({_rate(safe_allowed_total, safe_total):.1f}%)")
+        print(f"  FP safe blocked:   {safe_blocked_total}/{safe_total} ({_rate(safe_blocked_total, safe_total):.1f}%)")
+        print(
+            f"  rates: TPR={_rate(unsafe_blocked_total, unsafe_total):.1f}% "
+            f"FNR={_rate(unsafe_allowed_total, unsafe_total):.1f}% "
+            f"TNR={_rate(safe_allowed_total, safe_total):.1f}% "
+            f"FPR={_rate(safe_blocked_total, safe_total):.1f}%"
+        )
     if overall_total > 0:
         acc = 100 * overall_correct / overall_total
         print(f"Accuracy across all tested steps: {overall_correct}/{overall_total} ({acc:.1f}%)")

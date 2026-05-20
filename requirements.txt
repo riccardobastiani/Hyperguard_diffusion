@@ -241,8 +241,6 @@ typer==0.25.1
     #   transformers
 typing-extensions==4.15.0
     # via
-    #   aiosignal
-    #   anyio
     #   huggingface-hub
     #   torch
 tzdata==2026.2

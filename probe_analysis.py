@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-class", type=int, default=50, help="Number of safe and unsafe prompts to load.")
     parser.add_argument("--batch-size", type=int, default=1, help="Prompt batch size for generation/probing.")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"], help="Inference device.")
+    parser.add_argument("--gpu-id", type=int, default=1, help="GPU device ID to use (if device is cuda). Default: 1.")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic seed.")
     parser.add_argument("--output-dir", type=Path, default=Path("probe_outputs"), help="Directory for output artifacts.")
     parser.add_argument("--steps", type=int, default=64, help="Total denoising steps.")
@@ -179,8 +180,12 @@ def main() -> None:
     if not 50 <= args.samples_per_class <= 100:
         LOGGER.warning("The requested sample count is outside the recommended 50-100 range.")
 
+    import os
+    if args.device == "cuda":
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+        torch.cuda.set_device(0)
     device = resolve_device(args.device)
-    LOGGER.info("Using device: %s", device)
+    LOGGER.info("Using device: %s (gpu-id: %s)", device, args.gpu_id if args.device == "cuda" else "N/A")
 
     prompts, labels = load_balanced_prompt_dataset(
         samples_per_class=args.samples_per_class,

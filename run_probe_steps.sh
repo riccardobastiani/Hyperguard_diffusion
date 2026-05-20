@@ -12,6 +12,7 @@ SAFE_LOCAL_FIELD="${SAFE_LOCAL_FIELD:-Refined_behavior}"
 SAMPLES_PER_CLASS="${SAMPLES_PER_CLASS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 DEVICE="${DEVICE:-cuda}"
+GPU_ID="${GPU_ID:-1}"
 SEED="${SEED:-42}"
 STEPS="${STEPS:-64}"
 GEN_LENGTH="${GEN_LENGTH:-64}"
@@ -36,6 +37,7 @@ CMD=("${PYTHON}" probe_analysis.py \
   --samples-per-class "${SAMPLES_PER_CLASS}" \
   --batch-size "${BATCH_SIZE}" \
   --device "${DEVICE}" \
+  --gpu-id "${GPU_ID}" \
   --seed "${SEED}" \
   --output-dir "${OUT_DIR}" \
   --steps "${STEPS}" \
