@@ -1,17 +1,17 @@
 """
 Evaluate trained SVDD detectors using either:
-  - fresh activations extracted on-the-fly from the HuggingFace test set at
-    saralazza/llada-safety-dataset (default), or
   - pre-extracted probe activations (probe_outputs/layer_23/safe_probes.npz /
-    unsafe_probes.npz).
+    unsafe_probes.npz), or
+  - fresh activations extracted on-the-fly from the HuggingFace test set at
+    saralazza/llada-safety-dataset.
 
-Pass --cached-probes to use cached probe files instead. All other flags are
-compatible with both modes.
+Pass --hf-test to enable live inference.  All other flags are compatible with
+both modes.
 """
 import argparse
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -28,10 +28,6 @@ SAFETY_DATASET = "saralazza/llada-safety-dataset"
 SAFE_SOURCE = "alpaca"
 
 
-def _rate(numerator: int, denominator: int) -> float:
-    return 100.0 * numerator / denominator if denominator else 0.0
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt-dir", type=Path, default=CKPT_DIR,
@@ -43,19 +39,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--eval-all-unsafe",
         action="store_true",
-        default=True,
         help="Evaluate all unsafe samples and report block rate and distance stats.",
     )
     parser.add_argument(
         "--eval-all-safe",
         action="store_true",
-        default=True,
         help="Evaluate all safe samples and report block rate and distance stats.",
     )
     parser.add_argument(
-        "--single-sample",
+        "--metrics",
         action="store_true",
-        help="Evaluate only --sample-idx from each class instead of all samples.",
+        help="Report AUROC, AUPR, ASR, and confusion matrix (requires safe+unsafe).",
     )
     parser.add_argument(
         "--calibrate-quantile",
@@ -77,18 +71,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hf-test",
         action="store_true",
-        default=True,
         help=(
             "Download test samples from saralazza/llada-safety-dataset, run "
             "the LLaDA model and evaluate on fresh probe features instead of "
             "the cached .npz files."
         ),
-    )
-    parser.add_argument(
-        "--cached-probes",
-        action="store_false",
-        dest="hf_test",
-        help="Use cached safe_probes.npz / unsafe_probes.npz instead of HuggingFace test data.",
     )
     parser.add_argument(
         "--hf-split",
@@ -98,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--samples-per-class",
         type=int,
-        default=None,
-        help="Number of safe and unsafe samples to draw in HF mode (default: all available).",
+        default=50,
+        help="Number of safe and unsafe samples to draw in HF mode.",
     )
     parser.add_argument(
         "--seed",
@@ -140,22 +127,22 @@ def _resolve_split(dataset_dict, preferred: str):
     return dataset_dict[fallback]
 
 
-def _collect(dataset, text_fn, n: Optional[int]) -> List[str]:
+def _collect(dataset, text_fn, n: int) -> List[str]:
     prompts: List[str] = []
     for row in dataset:
         text = (text_fn(row) or "").strip()
         if text:
             prompts.append(text)
-        if n is not None and len(prompts) == n:
+        if len(prompts) == n:
             break
-    if n is not None and len(prompts) < n:
+    if len(prompts) < n:
         LOGGER.warning("Only %d/%d prompts available.", len(prompts), n)
     return prompts
 
 
 def load_hf_test_prompts(
     split: str,
-    samples_per_class: Optional[int],
+    samples_per_class: int,
     seed: int,
 ) -> Tuple[List[str], List[str]]:
     """Return (safe_prompts, unsafe_prompts) from the HuggingFace test set."""
@@ -199,6 +186,63 @@ def model_dtype(device: torch.device):
     if device.type == "cuda":
         return torch.bfloat16
     return torch.float32
+
+
+def _roc_auc(scores: np.ndarray, labels: np.ndarray) -> float:
+    positives = int(labels.sum())
+    negatives = int(labels.size - positives)
+    if positives == 0 or negatives == 0:
+        return float("nan")
+    order = np.argsort(scores)[::-1]
+    labels = labels[order]
+    tp = np.cumsum(labels == 1)
+    fp = np.cumsum(labels == 0)
+    tpr = tp / positives
+    fpr = fp / negatives
+    tpr = np.concatenate([[0.0], tpr])
+    fpr = np.concatenate([[0.0], fpr])
+    return float(np.trapz(tpr, fpr))
+
+
+def _pr_auc(scores: np.ndarray, labels: np.ndarray) -> float:
+    positives = int(labels.sum())
+    if positives == 0:
+        return float("nan")
+    order = np.argsort(scores)[::-1]
+    labels = labels[order]
+    tp = np.cumsum(labels == 1)
+    fp = np.cumsum(labels == 0)
+    recall = tp / positives
+    precision = tp / (tp + fp)
+    recall = np.concatenate([[0.0], recall])
+    precision = np.concatenate([[1.0], precision])
+    return float(np.trapz(precision, recall))
+
+
+def _compute_metrics(safe_dist: np.ndarray, unsafe_dist: np.ndarray, R: float) -> Dict[str, float]:
+    scores = np.concatenate([safe_dist, unsafe_dist])
+    labels = np.concatenate(
+        [np.zeros_like(safe_dist, dtype=np.int32), np.ones_like(unsafe_dist, dtype=np.int32)]
+    )
+    safe_blocked = safe_dist > R
+    unsafe_blocked = unsafe_dist > R
+    tp = int(unsafe_blocked.sum())
+    fn = int((~unsafe_blocked).sum())
+    fp = int(safe_blocked.sum())
+    tn = int((~safe_blocked).sum())
+    total_unsafe = tp + fn
+    asr_pre = 100.0
+    asr_post = 100.0 * fn / total_unsafe if total_unsafe > 0 else float("nan")
+    return {
+        "auroc": _roc_auc(scores, labels),
+        "aupr": _pr_auc(scores, labels),
+        "asr_pre": asr_pre,
+        "asr_post": asr_post,
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
+    }
 def apply_transformers_attribute_patch():
     """
     Fixes AttributeError: 'LLaDAModelLM' object has no attribute 'all_tied_weights_keys'
@@ -357,48 +401,58 @@ def main() -> None:
         datefmt="%H:%M:%S",
     )
     args = parse_args()
-    if args.single_sample:
-        args.eval_all_safe = False
-        args.eval_all_unsafe = False
     device = torch.device(args.device)
+    test_hooks_safe_path = args.ckpt_dir / "test_hooks_safe.npz"
+    test_hooks_unsafe_path = args.ckpt_dir / "test_hooks_unsafe.npz"
 
     # ------------------------------------------------------------------
     # Acquire probe features — either from .npz cache or live HF inference
     # ------------------------------------------------------------------
     if args.hf_test:
-        safe_prompts, unsafe_prompts = load_hf_test_prompts(
-            split=args.hf_split,
-            samples_per_class=args.samples_per_class,
-            seed=args.seed,
-        )
+        if test_hooks_safe_path.exists() and test_hooks_unsafe_path.exists():
+            safe_data = np.load(test_hooks_safe_path)
+            unsafe_data = np.load(test_hooks_unsafe_path)
+            print(f"Loaded test hooks from {args.ckpt_dir}")
+            print(f"  safe  keys: {list(safe_data.keys())}")
+            print(f"  unsafe keys: {list(unsafe_data.keys())}\n")
+        else:
+            safe_prompts, unsafe_prompts = load_hf_test_prompts(
+                split=args.hf_split,
+                samples_per_class=args.samples_per_class,
+                seed=args.seed,
+            )
 
-        model, tokenizer = load_llada_assets(args.model_name, device)
-        common_kwargs = dict(
-            model=model,
-            tokenizer=tokenizer,
-            layer_id=args.layer_id,
-            probe_steps=args.probe_steps,
-            batch_size=args.batch_size,
-            steps=args.steps,
-            gen_length=args.gen_length,
-            block_length=args.block_length,
-            max_prompt_length=args.max_prompt_length,
-            device=device,
-        )
+            model, tokenizer = load_llada_assets(args.model_name, device)
+            common_kwargs = dict(
+                model=model,
+                tokenizer=tokenizer,
+                layer_id=args.layer_id,
+                probe_steps=args.probe_steps,
+                batch_size=args.batch_size,
+                steps=args.steps,
+                gen_length=args.gen_length,
+                block_length=args.block_length,
+                max_prompt_length=args.max_prompt_length,
+                device=device,
+            )
 
-        LOGGER.info("Extracting probe features for %d safe prompts …", len(safe_prompts))
-        safe_features = extract_features_from_prompts(safe_prompts, **common_kwargs)
+            LOGGER.info("Extracting probe features for %d safe prompts …", len(safe_prompts))
+            safe_features = extract_features_from_prompts(safe_prompts, **common_kwargs)
 
-        LOGGER.info("Extracting probe features for %d unsafe prompts …", len(unsafe_prompts))
-        unsafe_features = extract_features_from_prompts(unsafe_prompts, **common_kwargs)
+            LOGGER.info("Extracting probe features for %d unsafe prompts …", len(unsafe_prompts))
+            unsafe_features = extract_features_from_prompts(unsafe_prompts, **common_kwargs)
 
-        # Wrap as {key: array} dicts keyed by "step_N" to reuse the loop below
-        safe_data   = {f"step_{s}": safe_features[s]   for s in args.probe_steps}
-        unsafe_data = {f"step_{s}": unsafe_features[s] for s in args.probe_steps}
+            # Wrap as {key: array} dicts keyed by "step_N" to reuse the loop below
+            safe_data   = {f"step_{s}": safe_features[s]   for s in args.probe_steps}
+            unsafe_data = {f"step_{s}": unsafe_features[s] for s in args.probe_steps}
 
-        print(f"\nUsing HuggingFace test data from '{SAFETY_DATASET}' (split='{args.hf_split}')")
-        print(f"  safe samples : {len(safe_prompts)}")
-        print(f"  unsafe samples: {len(unsafe_prompts)}\n")
+            np.savez(test_hooks_safe_path, **safe_data)
+            np.savez(test_hooks_unsafe_path, **unsafe_data)
+
+            print(f"\nUsing HuggingFace test data from '{SAFETY_DATASET}' (split='{args.hf_split}')")
+            print(f"  safe samples : {len(safe_prompts)}")
+            print(f"  unsafe samples: {len(unsafe_prompts)}")
+            print(f"  saved hooks to: {test_hooks_safe_path} / {test_hooks_unsafe_path}\n")
 
     else:
         safe_path   = args.ckpt_dir / "safe_probes.npz"
@@ -420,12 +474,11 @@ def main() -> None:
 
     overall_correct = 0
     overall_total   = 0
-    unsafe_blocked_total = 0  # TP: unsafe prompt correctly stopped
-    unsafe_allowed_total = 0  # FN: unsafe prompt allowed to pass
+    unsafe_blocked_total = 0
     unsafe_total = 0
-    safe_blocked_total = 0    # FP: safe prompt incorrectly stopped
-    safe_allowed_total = 0    # TN: safe prompt correctly allowed
+    safe_blocked_total = 0
     safe_total = 0
+    metrics_rows: List[Dict[str, float]] = []
 
     for step in args.probe_steps:
         ckpt = args.ckpt_dir / f"svdd_step_{step}.pt"
@@ -450,7 +503,7 @@ def main() -> None:
             safe_feat = torch.from_numpy(safe_arr).float().to(device)
             safe_dist = svdd.predict(safe_feat).cpu().numpy()
             new_R = float(np.quantile(safe_dist, args.calibrate_quantile))
-            svdd.set_radius(new_R)
+            svdd._R.fill_(new_R)
             out_path = ckpt if args.overwrite_checkpoints else ckpt.with_name(f"svdd_step_{step}_calib.pt")
             save_checkpoint(svdd, out_path)
             print(f"[step {step}] Calibrated R to {new_R:.6f} (quantile={args.calibrate_quantile}) -> {out_path}")
@@ -462,49 +515,58 @@ def main() -> None:
         else:
             print(f"[step {step}] Using calibrated R={R:.4f} for evaluation")
 
-        if args.eval_all_unsafe or args.eval_all_safe:
-            safe_feat = torch.from_numpy(safe_arr).float().to(device)
-            safe_dist = svdd.predict(safe_feat).cpu().numpy()
-            safe_blocked = safe_dist > R
-            fp_count = int(safe_blocked.sum())
-            tn_count = int((~safe_blocked).sum())
-            safe_count = safe_blocked.size
+        wants_metrics = args.metrics or (args.eval_all_safe and args.eval_all_unsafe)
+        if args.eval_all_unsafe or args.eval_all_safe or wants_metrics:
+            safe_dist = None
+            unsafe_dist = None
+            if args.eval_all_safe or wants_metrics:
+                safe_feat = torch.from_numpy(safe_arr).float().to(device)
+                safe_dist = svdd.predict(safe_feat).cpu().numpy()
+                if args.eval_all_safe:
+                    safe_blocked = safe_dist > R
+                    blocked_count = int(safe_blocked.sum())
+                    total_count = safe_blocked.size
+                    safe_blocked_total += blocked_count
+                    safe_total += total_count
+                    print(f"=== Step {step} | R={R:.4f} ===")
+                    print(f"  safe block rate: {blocked_count}/{total_count} ({100 * blocked_count / total_count:.1f}%)")
+                    print(
+                        f"  safe dist stats: min={safe_dist.min():.4f} "
+                        f"mean={safe_dist.mean():.4f} max={safe_dist.max():.4f}"
+                    )
 
-            unsafe_feat = torch.from_numpy(unsafe_arr).float().to(device)
-            unsafe_dist = svdd.predict(unsafe_feat).cpu().numpy()
-            unsafe_blocked = unsafe_dist > R
-            tp_count = int(unsafe_blocked.sum())
-            fn_count = int((~unsafe_blocked).sum())
-            unsafe_count = unsafe_blocked.size
+            if args.eval_all_unsafe or wants_metrics:
+                unsafe_feat = torch.from_numpy(unsafe_arr).float().to(device)
+                unsafe_dist = svdd.predict(unsafe_feat).cpu().numpy()
+                if args.eval_all_unsafe:
+                    unsafe_blocked = unsafe_dist > R
+                    blocked_count = int(unsafe_blocked.sum())
+                    total_count = unsafe_blocked.size
+                    unsafe_blocked_total += blocked_count
+                    unsafe_total += total_count
+                    if not args.eval_all_safe:
+                        print(f"=== Step {step} | R={R:.4f} ===")
+                    print(f"  unsafe block rate: {blocked_count}/{total_count} ({100 * blocked_count / total_count:.1f}%)")
+                    print(
+                        f"  unsafe dist stats: min={unsafe_dist.min():.4f} "
+                        f"mean={unsafe_dist.mean():.4f} max={unsafe_dist.max():.4f}"
+                    )
 
-            safe_blocked_total += fp_count
-            safe_allowed_total += tn_count
-            safe_total += safe_count
-            unsafe_blocked_total += tp_count
-            unsafe_allowed_total += fn_count
-            unsafe_total += unsafe_count
-
-            print(f"=== Step {step} | R={R:.4f} ===")
-            print(f"  TP unsafe blocked: {tp_count}/{unsafe_count} ({_rate(tp_count, unsafe_count):.1f}%)")
-            print(f"  FN unsafe allowed: {fn_count}/{unsafe_count} ({_rate(fn_count, unsafe_count):.1f}%)")
-            print(f"  TN safe allowed:   {tn_count}/{safe_count} ({_rate(tn_count, safe_count):.1f}%)")
-            print(f"  FP safe blocked:   {fp_count}/{safe_count} ({_rate(fp_count, safe_count):.1f}%)")
-            print(
-                f"  rates: TPR={_rate(tp_count, unsafe_count):.1f}% "
-                f"FNR={_rate(fn_count, unsafe_count):.1f}% "
-                f"TNR={_rate(tn_count, safe_count):.1f}% "
-                f"FPR={_rate(fp_count, safe_count):.1f}%"
-            )
-            if args.eval_all_safe:
+            if wants_metrics:
+                if safe_dist is None or unsafe_dist is None:
+                    raise ValueError("--metrics requires both safe and unsafe samples.")
+                metrics = _compute_metrics(safe_dist, unsafe_dist, R)
+                metrics_rows.append(metrics)
+                print("  metrics:")
+                print(f"    AUROC: {metrics['auroc']:.4f}")
+                print(f"    AUPR : {metrics['aupr']:.4f}")
+                print(f"    ASR pre-defense : {metrics['asr_pre']:.1f}%")
+                print(f"    ASR post-defense: {metrics['asr_post']:.1f}%")
                 print(
-                    f"  safe dist stats: min={safe_dist.min():.4f} "
-                    f"mean={safe_dist.mean():.4f} max={safe_dist.max():.4f}"
+                    f"    confusion matrix (TP/FP/TN/FN): "
+                    f"{metrics['tp']}/{metrics['fp']}/{metrics['tn']}/{metrics['fn']}"
                 )
-            if args.eval_all_unsafe:
-                print(
-                    f"  unsafe dist stats: min={unsafe_dist.min():.4f} "
-                    f"mean={unsafe_dist.mean():.4f} max={unsafe_dist.max():.4f}"
-                )
+
             print()
             continue
 
@@ -528,21 +590,31 @@ def main() -> None:
         overall_correct += int(not safe_blocked) + int(unsafe_blocked)
         overall_total   += 2
 
-    if (args.eval_all_safe or args.eval_all_unsafe) and safe_total > 0 and unsafe_total > 0:
-        print("Confusion matrix across steps:")
-        print(f"  TP unsafe blocked: {unsafe_blocked_total}/{unsafe_total} ({_rate(unsafe_blocked_total, unsafe_total):.1f}%)")
-        print(f"  FN unsafe allowed: {unsafe_allowed_total}/{unsafe_total} ({_rate(unsafe_allowed_total, unsafe_total):.1f}%)")
-        print(f"  TN safe allowed:   {safe_allowed_total}/{safe_total} ({_rate(safe_allowed_total, safe_total):.1f}%)")
-        print(f"  FP safe blocked:   {safe_blocked_total}/{safe_total} ({_rate(safe_blocked_total, safe_total):.1f}%)")
-        print(
-            f"  rates: TPR={_rate(unsafe_blocked_total, unsafe_total):.1f}% "
-            f"FNR={_rate(unsafe_allowed_total, unsafe_total):.1f}% "
-            f"TNR={_rate(safe_allowed_total, safe_total):.1f}% "
-            f"FPR={_rate(safe_blocked_total, safe_total):.1f}%"
-        )
+    if args.eval_all_safe and safe_total > 0:
+        rate = 100 * safe_blocked_total / safe_total
+        print(f"Safe block rate across steps: {safe_blocked_total}/{safe_total} ({rate:.1f}%)")
+    if args.eval_all_unsafe and unsafe_total > 0:
+        rate = 100 * unsafe_blocked_total / unsafe_total
+        print(f"Unsafe block rate across steps: {unsafe_blocked_total}/{unsafe_total} ({rate:.1f}%)")
     if overall_total > 0:
         acc = 100 * overall_correct / overall_total
         print(f"Accuracy across all tested steps: {overall_correct}/{overall_total} ({acc:.1f}%)")
+
+    if metrics_rows:
+        auroc = float(np.nanmean([m["auroc"] for m in metrics_rows]))
+        aupr = float(np.nanmean([m["aupr"] for m in metrics_rows]))
+        asr_pre = float(np.nanmean([m["asr_pre"] for m in metrics_rows]))
+        asr_post = float(np.nanmean([m["asr_post"] for m in metrics_rows]))
+        tp = int(sum(m["tp"] for m in metrics_rows))
+        fp = int(sum(m["fp"] for m in metrics_rows))
+        tn = int(sum(m["tn"] for m in metrics_rows))
+        fn = int(sum(m["fn"] for m in metrics_rows))
+        print("Metrics averaged across steps:")
+        print(f"  AUROC: {auroc:.4f}")
+        print(f"  AUPR : {aupr:.4f}")
+        print(f"  ASR pre-defense : {asr_pre:.1f}%")
+        print(f"  ASR post-defense: {asr_post:.1f}%")
+        print(f"  confusion matrix (TP/FP/TN/FN): {tp}/{fp}/{tn}/{fn}")
 
 
 if __name__ == "__main__":
