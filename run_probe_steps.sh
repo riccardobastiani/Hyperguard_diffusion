@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROBE_STEPS="${PROBE_STEPS:-1 5 10 20 30 40 50 64}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-probe_outputs}"
+PROBE_STEPS="${PROBE_STEPS:-1 5 10 15 20 25 30}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-layer_analysis_results}"
 PYTHON="${PYTHON:-.venv/bin/python}"
 
 MODEL_NAME="${MODEL_NAME:-GSAI-ML/LLaDA-8B-Instruct}"
@@ -38,3 +38,34 @@ for PROBE_STEP in ${PROBE_STEPS}; do
     --projection pca \
     --save-all-layer-projections
 done
+
+# Aggregate best layer per probe step into a single JSON file.
+# Produces: ${OUTPUT_ROOT}/best_layers.json mapping probe_step -> best_layer
+python - <<'PY'
+import json, os
+
+out_root = os.environ.get('OUTPUT_ROOT', 'layer_analysis_results')
+probe_steps = os.environ.get('PROBE_STEPS', '1 5 10 15 20 25 30').split()
+results = {}
+for step in probe_steps:
+  scores_path = os.path.join(out_root, step, 'layer_separability_scores.json')
+  if not os.path.exists(scores_path):
+    continue
+  with open(scores_path, 'r', encoding='utf-8') as fh:
+    scores = json.load(fh)
+  if not scores:
+    continue
+  # scores keys may be strings; pick the key with the highest score
+  best_layer = max(scores.items(), key=lambda kv: kv[1])[0]
+  try:
+    best_layer = int(best_layer)
+  except Exception:
+    pass
+  results[str(step)] = best_layer
+
+os.makedirs(out_root, exist_ok=True)
+out_path = os.path.join(out_root, 'best_layers.json')
+with open(out_path, 'w', encoding='utf-8') as fh:
+  json.dump(results, fh, indent=2)
+print('Wrote', out_path)
+PY
