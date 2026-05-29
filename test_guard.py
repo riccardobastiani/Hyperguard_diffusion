@@ -17,7 +17,12 @@ import numpy as np
 import torch
 import transformers
 
-from svdd import load_checkpoint, save_checkpoint
+from svdd import (
+    load_checkpoint,
+    load_euclidean_checkpoint,
+    save_checkpoint,
+    save_euclidean_checkpoint,
+)
 
 LOGGER = logging.getLogger("test_guard")
 
@@ -28,10 +33,23 @@ SAFETY_DATASET = "saralazza/llada-safety-dataset"
 SAFE_SOURCE = "alpaca"
 
 
+def _auc_integral(y: np.ndarray, x: np.ndarray) -> float:
+    """Integrate a curve with support for old and new NumPy versions."""
+    if hasattr(np, "trapezoid"):
+        return float(np.trapezoid(y, x))
+    return float(np.trapz(y, x))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt-dir", type=Path, default=CKPT_DIR,
-                        help="Directory containing svdd_step_*.pt and *_probes.npz files.")
+                        help="Directory containing detector checkpoints and *_probes.npz files.")
+    parser.add_argument(
+        "--detector-type",
+        choices=["hyperbolic", "euclidean"],
+        default="hyperbolic",
+        help="Detector checkpoint family to evaluate (default: hyperbolic).",
+    )
     parser.add_argument("--probe-steps", type=int, nargs="+", default=PROBE_STEPS,
                         metavar="STEP")
     parser.add_argument("--sample-idx", type=int, default=0,
@@ -60,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overwrite-checkpoints",
         action="store_true",
-        help="Overwrite svdd_step_*.pt with calibrated R (default saves new files).",
+        help="Overwrite detector checkpoints with calibrated R (default saves new files).",
     )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to run inference on (default: 'cuda' if available, else 'cpu').")
@@ -116,6 +134,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-prompt-length", type=int, default=512,
                         help="Tokenizer truncation length in HF mode.")
     return parser.parse_args()
+
+
+def _detector_checkpoint_path(ckpt_dir: Path, detector_type: str, step: int) -> Path:
+    prefix = "svdd" if detector_type == "hyperbolic" else "euclidean"
+    return ckpt_dir / f"{prefix}_step_{step}.pt"
+
+
+def _load_detector(detector_type: str, path: Path, device: torch.device):
+    if detector_type == "hyperbolic":
+        return load_checkpoint(path, device=device)
+    if detector_type == "euclidean":
+        return load_euclidean_checkpoint(path, device=device)
+    raise ValueError(f"Unsupported detector type: {detector_type}")
+
+
+def _save_detector(detector_type: str, detector, path: Path) -> None:
+    if detector_type == "hyperbolic":
+        save_checkpoint(detector, path)
+        return
+    if detector_type == "euclidean":
+        save_euclidean_checkpoint(detector, path)
+        return
+    raise ValueError(f"Unsupported detector type: {detector_type}")
 
 
 def _resolve_split(dataset_dict, preferred: str):
@@ -201,7 +242,7 @@ def _roc_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     fpr = fp / negatives
     tpr = np.concatenate([[0.0], tpr])
     fpr = np.concatenate([[0.0], fpr])
-    return float(np.trapz(tpr, fpr))
+    return _auc_integral(tpr, fpr)
 
 
 def _pr_auc(scores: np.ndarray, labels: np.ndarray) -> float:
@@ -216,7 +257,7 @@ def _pr_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     precision = tp / (tp + fp)
     recall = np.concatenate([[0.0], recall])
     precision = np.concatenate([[1.0], precision])
-    return float(np.trapz(precision, recall))
+    return _auc_integral(precision, recall)
 
 
 def _compute_metrics(safe_dist: np.ndarray, unsafe_dist: np.ndarray, R: float) -> Dict[str, float]:
@@ -481,12 +522,12 @@ def main() -> None:
     metrics_rows: List[Dict[str, float]] = []
 
     for step in args.probe_steps:
-        ckpt = args.ckpt_dir / f"svdd_step_{step}.pt"
+        ckpt = _detector_checkpoint_path(args.ckpt_dir, args.detector_type, step)
         if not ckpt.exists():
             print(f"[step {step}] checkpoint not found at {ckpt}, skipping.")
             continue
 
-        svdd = load_checkpoint(ckpt, device=device)
+        detector = _load_detector(args.detector_type, ckpt, device=device)
         key  = f"step_{step}"
 
         if key not in safe_data or key not in unsafe_data:
@@ -501,17 +542,18 @@ def main() -> None:
             if not 0.0 < args.calibrate_quantile < 1.0:
                 raise ValueError("--calibrate-quantile must be between 0 and 1.")
             safe_feat = torch.from_numpy(safe_arr).float().to(device)
-            safe_dist = svdd.predict(safe_feat).cpu().numpy()
+            safe_dist = detector.predict(safe_feat).cpu().numpy()
             new_R = float(np.quantile(safe_dist, args.calibrate_quantile))
-            svdd._R.fill_(new_R)
-            out_path = ckpt if args.overwrite_checkpoints else ckpt.with_name(f"svdd_step_{step}_calib.pt")
-            save_checkpoint(svdd, out_path)
+            detector.set_radius(new_R)
+            prefix = "svdd" if args.detector_type == "hyperbolic" else "euclidean"
+            out_path = ckpt if args.overwrite_checkpoints else ckpt.with_name(f"{prefix}_step_{step}_calib.pt")
+            _save_detector(args.detector_type, detector, out_path)
             print(f"[step {step}] Calibrated R to {new_R:.6f} (quantile={args.calibrate_quantile}) -> {out_path}")
             calibrated = True
 
-        R = svdd.R.item()
+        R = detector.R.item()
         if not calibrated:
-            print(f"[step {step}] Loaded SVDD checkpoint from {ckpt} with R={R:.4f}")
+            print(f"[step {step}] Loaded {args.detector_type} checkpoint from {ckpt} with R={R:.4f}")
         else:
             print(f"[step {step}] Using calibrated R={R:.4f} for evaluation")
 
@@ -521,7 +563,7 @@ def main() -> None:
             unsafe_dist = None
             if args.eval_all_safe or wants_metrics:
                 safe_feat = torch.from_numpy(safe_arr).float().to(device)
-                safe_dist = svdd.predict(safe_feat).cpu().numpy()
+                safe_dist = detector.predict(safe_feat).cpu().numpy()
                 if args.eval_all_safe:
                     safe_blocked = safe_dist > R
                     blocked_count = int(safe_blocked.sum())
@@ -537,7 +579,7 @@ def main() -> None:
 
             if args.eval_all_unsafe or wants_metrics:
                 unsafe_feat = torch.from_numpy(unsafe_arr).float().to(device)
-                unsafe_dist = svdd.predict(unsafe_feat).cpu().numpy()
+                unsafe_dist = detector.predict(unsafe_feat).cpu().numpy()
                 if args.eval_all_unsafe:
                     unsafe_blocked = unsafe_dist > R
                     blocked_count = int(unsafe_blocked.sum())
@@ -574,8 +616,8 @@ def main() -> None:
         safe_feat   = torch.from_numpy(safe_arr[idx:idx+1]).float().to(device)
         unsafe_feat = torch.from_numpy(unsafe_arr[idx:idx+1]).float().to(device)
 
-        safe_dist   = svdd.predict(safe_feat).item()
-        unsafe_dist = svdd.predict(unsafe_feat).item()
+        safe_dist   = detector.predict(safe_feat).item()
+        unsafe_dist = detector.predict(unsafe_feat).item()
         safe_blocked   = safe_dist   > R
         unsafe_blocked = unsafe_dist > R
 

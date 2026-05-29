@@ -1,13 +1,17 @@
 import logging
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, TYPE_CHECKING, Union
 
-import geoopt
+try:
+    import geoopt
+except ModuleNotFoundError:  # Euclidean baseline does not require geoopt.
+    geoopt = None
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from hyperbolic_projection import HyperbolicProjection
+if TYPE_CHECKING:
+    from hyperbolic_projection import HyperbolicProjection
 
 LOGGER = logging.getLogger("svdd")
 
@@ -21,7 +25,7 @@ def _inverse_softplus(x: torch.Tensor) -> torch.Tensor:
 # Hyperbolic distance
 # ---------------------------------------------------------------------------
 
-def lorentz_distance(manifold: geoopt.manifolds.Lorentz, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+def lorentz_distance(manifold, p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     """Lorentz (hyperbolic) distance between batched points p and q.
 
     Args:
@@ -35,13 +39,18 @@ def lorentz_distance(manifold: geoopt.manifolds.Lorentz, p: torch.Tensor, q: tor
     return manifold.dist(p, q)
 
 
+def euclidean_distance(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+    """Euclidean distance between batched points p and q."""
+    return torch.linalg.vector_norm(p - q, dim=-1)
+
+
 # ---------------------------------------------------------------------------
 # SVDD center initialization
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def init_center(
-    projector: HyperbolicProjection,
+    projector: "HyperbolicProjection",
     safe_features: torch.Tensor,
     eps: float = 0.1,
     max_norm: float = 15.0,
@@ -110,7 +119,7 @@ class HyperbolicSVDD(nn.Module):
 
     def __init__(
         self,
-        projector: HyperbolicProjection,
+        projector: "HyperbolicProjection",
         center: torch.Tensor,
         nu: float = 0.1,
         initial_R: float = 1.0,
@@ -217,6 +226,102 @@ class HyperbolicSVDD(nn.Module):
         return self.predict(x) > self.R
 
 
+class EuclideanSVDD(nn.Module):
+    """One-class SVDD baseline in the original Euclidean probe space.
+
+    This is the baseline counterpart to HyperbolicSVDD: hidden-state probes are
+    scored by their L2 distance to the safe centroid, with the radius calibrated
+    from safe distances.
+    """
+
+    def __init__(
+        self,
+        center: torch.Tensor,
+        initial_R: float = 1.0,
+        radius_eps: float = 1e-6,
+    ):
+        super().__init__()
+        if initial_R <= 0.0:
+            raise ValueError("initial_R must be positive.")
+
+        self.radius_eps = radius_eps
+        self.register_buffer("center", center)
+
+        initial_radius = torch.tensor([initial_R], dtype=center.dtype, device=center.device)
+        raw_radius = _inverse_softplus((initial_radius - radius_eps).clamp_min(1e-12))
+        self._log_R = nn.Parameter(raw_radius, requires_grad=False)
+
+    @property
+    def R(self) -> torch.Tensor:
+        return F.softplus(self._log_R) + self.radius_eps
+
+    @torch.no_grad()
+    def set_radius(self, value: Union[float, torch.Tensor]) -> None:
+        """Set R while preserving the positive softplus parameterization."""
+        radius = torch.as_tensor(value, dtype=self._log_R.dtype, device=self._log_R.device).reshape_as(self._log_R)
+        raw_radius = _inverse_softplus((radius - self.radius_eps).clamp_min(1e-12))
+        self._log_R.copy_(raw_radius)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return probes unchanged so the detector matches the SVDD interface."""
+        return x.float()
+
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        """Return Euclidean distance to the safe centroid for each sample."""
+        features = self.forward(x)
+        center = self.center.unsqueeze(0).expand_as(features)
+        return euclidean_distance(features, center)
+
+    @torch.no_grad()
+    def classify(self, x: torch.Tensor) -> torch.Tensor:
+        """Return True for samples predicted as unsafe (distance > R)."""
+        return self.predict(x) > self.R
+
+
+@torch.no_grad()
+def fit_euclidean_svdd(
+    safe_features: torch.Tensor,
+    nu: float = 0.01,
+    radius_quantile: Optional[float] = None,
+) -> EuclideanSVDD:
+    """Fit the Euclidean one-class baseline from safe probe features.
+
+    Args:
+        safe_features:    Safe hooks [n_safe, in_dim].
+        nu:               Fraction of safe samples allowed outside the sphere
+                          when radius_quantile is not provided.
+        radius_quantile:  Optional explicit safe-distance quantile for R.
+
+    Returns:
+        EuclideanSVDD with center=mean(safe_features) and calibrated R.
+    """
+    if not 0.0 < nu <= 1.0:
+        raise ValueError("nu must be in the interval (0, 1].")
+    if radius_quantile is None:
+        radius_quantile = 1.0 - nu
+    if not 0.0 < radius_quantile <= 1.0:
+        raise ValueError("radius_quantile must be in the interval (0, 1].")
+
+    safe_features = safe_features.float()
+    if not torch.isfinite(safe_features).all():
+        raise ValueError("Safe probes contain NaN/Inf; delete cache and recompute.")
+
+    center = safe_features.mean(dim=0)
+    distances = euclidean_distance(safe_features, center.unsqueeze(0).expand_as(safe_features))
+    radius = torch.quantile(distances, radius_quantile).clamp_min(1e-6)
+    detector = EuclideanSVDD(center=center, initial_R=float(radius))
+    LOGGER.info(
+        "Euclidean SVDD fitted. safe distance stats: min=%.6f mean=%.6f max=%.6f R(q=%.4f)=%.6f.",
+        float(distances.min()),
+        float(distances.mean()),
+        float(distances.max()),
+        radius_quantile,
+        float(detector.R.detach()),
+    )
+    return detector
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -309,6 +414,8 @@ def save_checkpoint(svdd: HyperbolicSVDD, path: Path) -> None:
 
 def load_checkpoint(path: Path, device: torch.device = torch.device("cpu")) -> HyperbolicSVDD:
     """Load a HyperbolicSVDD from a checkpoint file."""
+    from hyperbolic_projection import HyperbolicProjection
+
     ckpt = torch.load(path, map_location=device)
     projector = HyperbolicProjection(
         in_dim=ckpt["in_dim"],
@@ -331,3 +438,39 @@ def load_checkpoint(path: Path, device: torch.device = torch.device("cpu")) -> H
     svdd.eval()
     LOGGER.info("Checkpoint loaded from %s. R=%.6f.", path, float(svdd.R.detach()))
     return svdd
+
+
+def save_euclidean_checkpoint(detector: EuclideanSVDD, path: Path) -> None:
+    """Save a EuclideanSVDD baseline checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "detector_type": "euclidean_svdd",
+            "center": detector.center.cpu(),
+            "R": detector.R.detach().cpu(),
+            "log_R": detector._log_R.detach().cpu(),
+            "radius_eps": detector.radius_eps,
+            "in_dim": detector.center.numel(),
+        },
+        path,
+    )
+    LOGGER.info("Euclidean checkpoint saved to %s.", path)
+
+
+def load_euclidean_checkpoint(path: Path, device: torch.device = torch.device("cpu")) -> EuclideanSVDD:
+    """Load a EuclideanSVDD baseline checkpoint."""
+    ckpt = torch.load(path, map_location=device)
+    detector = EuclideanSVDD(
+        center=ckpt["center"].to(device),
+        initial_R=float(torch.as_tensor(ckpt.get("R", 1.0)).reshape(-1)[0]),
+        radius_eps=ckpt.get("radius_eps", 1e-6),
+    )
+    if "log_R" in ckpt:
+        detector._log_R.data.copy_(ckpt["log_R"].to(device).reshape_as(detector._log_R))
+    elif "R" in ckpt:
+        detector.set_radius(ckpt["R"].to(device))
+    detector.to(device)
+    detector.eval()
+    LOGGER.info("Euclidean checkpoint loaded from %s. R=%.6f.", path, float(detector.R.detach()))
+    return detector
+

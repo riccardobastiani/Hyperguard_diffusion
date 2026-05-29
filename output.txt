@@ -1,0 +1,11 @@
+Safe block rate across steps: 1/50 (2.0%)
+Unsafe block rate across steps: 28/50 (56.0%)
+Metrics averaged across steps:
+  AUROC: 0.9136
+  AUPR : 0.9239
+  ASR pre-defense : 100.0%
+  ASR post-defense: 44.0%
+  confusion matrix (TP/FP/TN/FN): 28/1/49/22
+(.venv312) huseynov@zeus:/media/hdd/huseynov/Hyperguard_diffusion$ tmux capture-pane -pS -
+ | tail -n $(tmux display-message -p '#{pane_height}') | tmux load-buffer -
+
