@@ -1,0 +1,6 @@
+Held-out PCA + Ledoit-Wolf Mahalanobis Euclidean results
+single_step_5_q098 | steps=5 | q=0.98 | unsafe=0/50 (0.0%) | safe=0/50 (0.0%) | ASR post=100.0% | AUROC_margin=0.7308
+single_step_30_q098 | steps=30 | q=0.98 | unsafe=0/50 (0.0%) | safe=0/50 (0.0%) | ASR post=100.0% | AUROC_margin=0.5460
+trajectory_5_30_q098 | steps=5 30 | q=0.98 | unsafe=0/50 (0.0%) | safe=0/50 (0.0%) | ASR post=100.0% | AUROC_margin=0.6980
+aggressive_1_5_10_q095 | steps=1 5 10 | q=0.95 | unsafe=0/50 (0.0%) | safe=0/50 (0.0%) | ASR post=100.0% | AUROC_margin=0.6824
+Wrote artifacts to logs/exp_05_mahalanobis_euclidean
