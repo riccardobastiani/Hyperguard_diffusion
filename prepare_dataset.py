@@ -13,7 +13,7 @@ def main():
         source_dataset = item.get("source_dataset", "")
         source_lower = source_dataset.lower()
         
-        # Map fields for jailbreakbench_llada.py
+        # Map fields for the safety prompt runners.
         # Save the source in "source" so it gets automatically copied to the output JSON
         formatted_item = {
             "vanilla prompt": item.get("behavior", ""),

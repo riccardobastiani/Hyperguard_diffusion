@@ -361,6 +361,7 @@ joblib==1.5.1
     #   nltk
     #   scikit-learn
 jsonlines==4.0.0
+geoopt==0.5.1
     # via -r requirements.in
 jsonschema==4.24.0
     # via

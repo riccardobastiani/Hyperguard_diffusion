@@ -82,6 +82,7 @@ jiter==0.10.0
 jmespath==1.0.1
 joblib==1.5.1
 jsonlines==4.0.0
+geoopt==0.5.1
 jsonschema==4.24.0
 jsonschema-specifications==2025.4.1
 kiwisolver==1.4.8
