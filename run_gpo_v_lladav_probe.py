@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,9 @@ from gpo_v.lladav import (
 
 LOGGER = logging.getLogger("run_gpo_v_lladav_probe")
 
+# Upstream GPO-V code can call breakpoint() in model loading paths.
+os.environ.setdefault("PYTHONBREAKPOINT", "0")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="GPO-V LLaDA-V multimodal activation probe runner.")
@@ -36,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device-map", default="cuda:0")
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32"])
+    parser.add_argument("--load-8bit", action="store_true", help="Load model with 8-bit quantization.")
+    parser.add_argument("--load-4bit", action="store_true", help="Load model with 4-bit quantization.")
     parser.add_argument("--probe-steps", type=int, nargs="+", default=[5, 10, 15])
     parser.add_argument("--layer-ids", type=int, nargs="+", default=[16, 23, 29])
     parser.add_argument("--max-samples", type=int, default=None)
@@ -91,6 +97,8 @@ def main() -> None:
         device_map=args.device_map,
         cache_dir=args.cache_dir,
         dtype=args.dtype,
+        load_8bit=args.load_8bit,
+        load_4bit=args.load_4bit,
     )
     device = next(model.parameters()).device
     args.output_dir.mkdir(parents=True, exist_ok=True)

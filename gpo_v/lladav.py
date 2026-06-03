@@ -56,6 +56,8 @@ def load_lladav_assets(
     device_map: str = "cuda:0",
     cache_dir: str | None = None,
     dtype: str = "float16",
+    load_8bit: bool = False,
+    load_4bit: bool = False,
 ):
     """Load tokenizer/model/image processor using the upstream LLaDA-V loader."""
     add_gpo_v_root(gpo_v_root)
@@ -65,6 +67,8 @@ def load_lladav_assets(
         "attn_implementation": "sdpa",
         "device_map": device_map,
         "torch_dtype": model_dtype(dtype),
+        "load_8bit": load_8bit,
+        "load_4bit": load_4bit,
     }
     if cache_dir:
         kwargs["cache_dir"] = cache_dir
@@ -74,6 +78,14 @@ def load_lladav_assets(
         model_alias,
         **kwargs,
     )
+    # Keep projector dtype consistent with multimodal image features.
+    # Some upstream checkpoints leave mm_projector in float32 while inputs are float16.
+    requested_dtype = model_dtype(dtype)
+    projector = _get_attr_path(model, "model.mm_projector")
+    if projector is None:
+        projector = _get_attr_path(model, "mm_projector")
+    if projector is not None:
+        projector.to(dtype=requested_dtype)
     model.eval()
     return tokenizer, model, image_processor, max_length
 
@@ -303,37 +315,55 @@ def optimize_image_with_gpo(
     optimizer = optim.Adam([x_adv], lr=lr)
     history = []
 
-    for step in range(attack_steps):
-        optimizer.zero_grad()
-        logits = model.generate(
-            input_ids,
-            images=x_adv.to(dtype=torch.float16),
-            image_sizes=image_sizes,
-            steps=generation_steps,
-            gen_length=gen_length,
-            block_length=block_length,
-            tokenizer=tokenizer,
-            stopping_criteria=["<|eot_id|>"],
-            prefix_refresh_interval=32,
-            threshold=1,
-            init=False,
-        )
-        response_logits = logits[:, start_idx:end_idx, :] if start_idx is not None and end_idx is not None else logits
-        if response_logits.shape[1] >= 2:
-            response_logits[:, -1, 126348] = float("-inf")
-            response_logits[:, -2, 13] = float("-inf")
-        loss, monitor = loss_fn(response_logits)
-        loss.backward()
-        optimizer.step()
+    # Memory mitigation for large LLaDA-V backprop through generation.
+    was_training = model.training
+    cache_was_enabled = getattr(getattr(model, "config", None), "use_cache", None)
+    grad_ckpt_enabled = False
+    try:
+        if hasattr(model, "gradient_checkpointing_enable"):
+            model.gradient_checkpointing_enable()
+            grad_ckpt_enabled = True
+        if cache_was_enabled is not None:
+            model.config.use_cache = False
+        model.train()
 
-        with torch.no_grad():
-            delta = torch.clamp(x_adv.data - x_orig, -epsilon, epsilon)
-            x_adv.data = torch.clamp(x_orig + delta, 0.0, 1.0)
-        history.append(float(loss.item()))
+        for step in range(attack_steps):
+            optimizer.zero_grad()
+            logits = model.generate(
+                input_ids,
+                images=x_adv.to(dtype=torch.float16),
+                image_sizes=image_sizes,
+                steps=generation_steps,
+                gen_length=gen_length,
+                block_length=block_length,
+                tokenizer=tokenizer,
+                stopping_criteria=["<|eot_id|>"],
+                prefix_refresh_interval=32,
+                threshold=1,
+                init=False,
+            )
+            response_logits = logits[:, start_idx:end_idx, :] if start_idx is not None and end_idx is not None else logits
+            if response_logits.shape[1] >= 2:
+                response_logits[:, -1, 126348] = float("-inf")
+                response_logits[:, -2, 13] = float("-inf")
+            loss, monitor = loss_fn(response_logits)
+            loss.backward()
+            optimizer.step()
 
-        if monitor and all(hit and prob >= early_stop_threshold for _, prob, hit in monitor.values()):
-            LOGGER.info("GPO-V early stop at attack step %d.", step + 1)
-            break
+            with torch.no_grad():
+                delta = torch.clamp(x_adv.data - x_orig, -epsilon, epsilon)
+                x_adv.data = torch.clamp(x_orig + delta, 0.0, 1.0)
+            history.append(float(loss.item()))
+
+            if monitor and all(hit and prob >= early_stop_threshold for _, prob, hit in monitor.values()):
+                LOGGER.info("GPO-V early stop at attack step %d.", step + 1)
+                break
+    finally:
+        if cache_was_enabled is not None:
+            model.config.use_cache = cache_was_enabled
+        if grad_ckpt_enabled and hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+        model.train(was_training)
 
     return x_adv.detach(), history, (start_idx, end_idx)
 

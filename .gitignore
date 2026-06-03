@@ -1,14 +1,31 @@
 /DLLM_safety/
-.vscode-server/
-.cache/
-*.json
-.vscode-server/
-.cache/
+
+# Python envs
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and logs
 __pycache__/
-*.log
-.vscode-server/
-.cache/
-__pycache__/
+*.py[cod]
 *.log
 
-.venv/
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+bin/
+
+# Local tooling and editor caches
+.cache/
+.vscode-server/
+.pytest_cache/
+.mypy_cache/
+
+# Local data/output artifacts
+*.json
+data/
+outputs/
+external/
+.env.multimodal

@@ -9,6 +9,11 @@ UNSAFE_FIELD="${UNSAFE_FIELD:-}"
 IMAGE_PATH="${IMAGE_PATH:-gpo_v/assets/example_input_image.jpg}"
 DATASET_PATH="${DATASET_PATH:-data/multimodal_gpo/smoke.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/multimodal_gpo/smoke_skip_attack}"
+GENERATION_STEPS="${GENERATION_STEPS:-32}"
+GEN_LENGTH="${GEN_LENGTH:-32}"
+BLOCK_LENGTH="${BLOCK_LENGTH:-8}"
+DEVICE_MAP="${DEVICE_MAP:-auto}"
+QUANTIZATION="${QUANTIZATION:-4bit}"
 
 cd "$ROOT_DIR"
 
@@ -32,7 +37,16 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
 mkdir -p "$(dirname "$DATASET_PATH")" "$OUTPUT_DIR"
+
+quant_flags=()
+if [[ "$QUANTIZATION" == "8bit" ]]; then
+  quant_flags+=(--load-8bit)
+elif [[ "$QUANTIZATION" == "4bit" ]]; then
+  quant_flags+=(--load-4bit)
+fi
 
 prepare_cmd=(
   python prepare_multimodal_gpo_dataset.py
@@ -59,9 +73,14 @@ python run_gpo_v_lladav_probe.py \
   --gpo-v-root "$GPO_V_ROOT" \
   --input-jsonl "$DATASET_PATH" \
   --output-dir "$OUTPUT_DIR" \
+  --device-map "$DEVICE_MAP" \
   --probe-steps 5 \
   --layer-ids 23 \
   --max-samples 2 \
+  --generation-steps "$GENERATION_STEPS" \
+  --gen-length "$GEN_LENGTH" \
+  --block-length "$BLOCK_LENGTH" \
+  "${quant_flags[@]}" \
   --skip-attack
 
 OUTPUT_DIR="$OUTPUT_DIR" python - <<'PY'
@@ -102,9 +121,14 @@ if [[ "${RUN_ATTACK_SMOKE:-0}" == "1" ]]; then
     --gpo-v-root "$GPO_V_ROOT" \
     --input-jsonl "$DATASET_PATH" \
     --output-dir "$ATTACK_OUTPUT_DIR" \
+    --device-map "$DEVICE_MAP" \
     --probe-steps 5 \
     --layer-ids 23 \
     --max-samples 2 \
+    --generation-steps "$GENERATION_STEPS" \
+    --gen-length "$GEN_LENGTH" \
+    --block-length "$BLOCK_LENGTH" \
+    "${quant_flags[@]}" \
     --attack-steps "${ATTACK_STEPS:-5}"
 fi
 

@@ -6,6 +6,8 @@ UNSAFE_FILE="${UNSAFE_FILE:-$ROOT_DIR/data/advbench.csv}"
 SAFE_FILE="${SAFE_FILE:-$ROOT_DIR/data/alpaca_safe.csv}"
 IMAGE_PATH="${IMAGE_PATH:-$ROOT_DIR/gpo_v/assets/example_input_image.jpg}"
 OUTPUT_PATH="${OUTPUT_PATH:-$ROOT_DIR/data/multimodal_gpo/llada_v_gpo_prompts.jsonl}"
+MAX_SAFE="${MAX_SAFE:-500}"
+MAX_UNSAFE="${MAX_UNSAFE:-500}"
 
 cd "$ROOT_DIR"
 
@@ -32,8 +34,8 @@ python3 prepare_multimodal_gpo_dataset.py \
   --unsafe-source-name advbench \
   --safe-file "$SAFE_FILE" \
   --safe-field instruction \
-  --max-safe 50 \
-  --max-unsafe 50 \
+  --max-safe "$MAX_SAFE" \
+  --max-unsafe "$MAX_UNSAFE" \
   --image-path "$IMAGE_PATH" \
   --output "$OUTPUT_PATH"
 
