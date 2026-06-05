@@ -1,5 +1,3 @@
-# README
-
 # Repository Workflow: Hyperguard_diffusion
 
 ## 1. Purpose of the repository
