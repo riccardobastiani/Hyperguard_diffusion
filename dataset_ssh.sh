@@ -8,8 +8,15 @@ IMAGE_PATH="${IMAGE_PATH:-$ROOT_DIR/gpo_v/assets/example_input_image.jpg}"
 OUTPUT_PATH="${OUTPUT_PATH:-$ROOT_DIR/data/multimodal_gpo/llada_v_gpo_prompts.jsonl}"
 MAX_SAFE="${MAX_SAFE:-500}"
 MAX_UNSAFE="${MAX_UNSAFE:-500}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 cd "$ROOT_DIR"
+
+if [[ "$PYTHON_BIN" == "python3" && -x "$ROOT_DIR/venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT_DIR/venv/bin/python"
+elif [[ "$PYTHON_BIN" == "python3" && -x "$ROOT_DIR/.venv/bin/python" ]]; then
+  PYTHON_BIN="$ROOT_DIR/.venv/bin/python"
+fi
 
 if [[ ! -f "$UNSAFE_FILE" ]]; then
   echo "Unsafe prompt file not found: $UNSAFE_FILE" >&2
@@ -28,7 +35,7 @@ fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 
-python3 prepare_multimodal_gpo_dataset.py \
+"$PYTHON_BIN" prepare_multimodal_gpo_dataset.py \
   --unsafe-file "$UNSAFE_FILE" \
   --unsafe-field goal \
   --unsafe-source-name advbench \

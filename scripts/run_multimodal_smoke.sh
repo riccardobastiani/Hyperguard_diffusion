@@ -23,9 +23,13 @@ if [[ -f "$ROOT_DIR/.env.multimodal" ]]; then
   GPO_V_ROOT="${1:-${GPO_V_ROOT:-}}"
 fi
 
-if [[ -z "$GPO_V_ROOT" || ! -f "$GPO_V_ROOT/predict.py" ]]; then
-  echo "Usage: bash scripts/run_multimodal_smoke.sh /path/to/GPO-V/LLaDA-V [unsafe_prompts.csv]" >&2
-  echo "GPO_V_ROOT must point to the upstream GPO-V LLaDA-V folder." >&2
+if [[ "$VENV_DIR" == "$ROOT_DIR/.venv" && ! -f "$VENV_DIR/bin/activate" && -f "$ROOT_DIR/venv/bin/activate" ]]; then
+  VENV_DIR="$ROOT_DIR/venv"
+fi
+
+if [[ -z "$GPO_V_ROOT" || ! -f "$GPO_V_ROOT/llava/model/builder.py" ]]; then
+  echo "Usage: bash scripts/run_multimodal_smoke.sh /path/to/GPO-V/LLaDA-V/train [unsafe_prompts.csv]" >&2
+  echo "GPO_V_ROOT must point to the upstream LLaDA-V train folder containing llava/model/builder.py." >&2
   exit 1
 fi
 

@@ -14,9 +14,9 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 if [[ -n "$GPO_V_ROOT" ]]; then
-  if [[ ! -f "$GPO_V_ROOT/predict.py" ]]; then
-    echo "GPO_V_ROOT must point to the upstream GPO-V LLaDA-V folder." >&2
-    echo "Expected file: $GPO_V_ROOT/predict.py" >&2
+  if [[ ! -f "$GPO_V_ROOT/llava/model/builder.py" ]]; then
+    echo "GPO_V_ROOT must point to the upstream LLaDA-V train folder." >&2
+    echo "Expected file: $GPO_V_ROOT/llava/model/builder.py" >&2
     exit 1
   fi
   printf 'GPO_V_ROOT=%q\n' "$GPO_V_ROOT" > "$ROOT_DIR/.env.multimodal"

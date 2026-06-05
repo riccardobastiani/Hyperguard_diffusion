@@ -112,10 +112,12 @@ def _atomic_write_json(path: Path, payload: dict | list) -> None:
 
 def _atomic_write_npz(path: Path, arrays: dict[str, np.ndarray]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("wb", dir=path.parent, delete=False) as tmp:
+    with tempfile.NamedTemporaryFile("wb", suffix=".npz", dir=path.parent, delete=False) as tmp:
+        np.savez(tmp, **arrays)
+        tmp.flush()
+        os.fsync(tmp.fileno())
         tmp_path = Path(tmp.name)
     try:
-        np.savez(tmp_path, **arrays)
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists():

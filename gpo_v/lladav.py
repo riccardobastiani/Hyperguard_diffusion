@@ -159,6 +159,52 @@ def _get_attr_path(root: Any, dotted: str) -> Any | None:
     return obj
 
 
+def _extract_logits(output: Any) -> torch.Tensor:
+    if hasattr(output, "logits"):
+        return output.logits
+    if isinstance(output, (tuple, list)) and output and torch.is_tensor(output[0]):
+        return output[0]
+    if torch.is_tensor(output):
+        return output
+    raise TypeError(f"Could not extract logits from model output type {type(output)!r}.")
+
+
+def differentiable_response_logits(
+    model,
+    input_ids: torch.Tensor,
+    images: torch.Tensor,
+    image_sizes: list[tuple[int, int]],
+    *,
+    gen_length: int,
+    mask_id: int = 126336,
+) -> torch.Tensor:
+    """Return logits for a masked response suffix while preserving image gradients."""
+    mask_ids = torch.full(
+        (input_ids.shape[0], gen_length),
+        mask_id,
+        dtype=input_ids.dtype,
+        device=input_ids.device,
+    )
+    attack_input_ids = torch.cat([input_ids, mask_ids], dim=1)
+    prompt_labels = torch.full_like(input_ids, -100)
+    response_labels = torch.full_like(mask_ids, mask_id)
+    labels = torch.cat([prompt_labels, response_labels], dim=1)
+    outputs = model(
+        input_ids=attack_input_ids,
+        images=images,
+        image_sizes=image_sizes,
+        labels=labels,
+        return_dict=True,
+    )
+    logits = _extract_logits(outputs)
+    if not torch.is_floating_point(logits):
+        raise TypeError(
+            "Attack optimization expected floating-point logits from model.forward, "
+            f"got dtype={logits.dtype}."
+        )
+    return logits[:, -gen_length:, :]
+
+
 def find_layer_stack(model) -> tuple[str, Any]:
     """Find the transformer layer container for common LLaVA/LLaDA layouts."""
     candidates = [
@@ -329,23 +375,23 @@ def optimize_image_with_gpo(
 
         for step in range(attack_steps):
             optimizer.zero_grad()
-            logits = model.generate(
+            response_logits = differentiable_response_logits(
+                model,
                 input_ids,
-                images=x_adv.to(dtype=torch.float16),
-                image_sizes=image_sizes,
-                steps=generation_steps,
+                x_adv.to(dtype=torch.float16),
+                image_sizes,
                 gen_length=gen_length,
-                block_length=block_length,
-                tokenizer=tokenizer,
-                stopping_criteria=["<|eot_id|>"],
-                prefix_refresh_interval=32,
-                threshold=1,
-                init=False,
             )
-            response_logits = logits[:, start_idx:end_idx, :] if start_idx is not None and end_idx is not None else logits
+            if start_idx is not None and end_idx is not None:
+                span_start = max(0, min(start_idx, response_logits.shape[1] - 1))
+                span_end = max(span_start + 1, min(end_idx, response_logits.shape[1]))
+                response_logits = response_logits[:, span_start:span_end, :]
             if response_logits.shape[1] >= 2:
-                response_logits[:, -1, 126348] = float("-inf")
-                response_logits[:, -2, 13] = float("-inf")
+                response_logits = response_logits.clone()
+                if response_logits.shape[-1] > 126348:
+                    response_logits[:, -1, 126348] = torch.finfo(response_logits.dtype).min
+                if response_logits.shape[-1] > 13:
+                    response_logits[:, -2, 13] = torch.finfo(response_logits.dtype).min
             loss, monitor = loss_fn(response_logits)
             loss.backward()
             optimizer.step()
