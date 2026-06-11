@@ -1,0 +1,31 @@
+/DLLM_safety/
+
+# Python envs
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and logs
+__pycache__/
+*.py[cod]
+*.log
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+bin/
+
+# Local tooling and editor caches
+.cache/
+.vscode-server/
+.pytest_cache/
+.mypy_cache/
+
+# Local data/output artifacts
+*.json
+data/
+outputs/
+external/
+.env.multimodal

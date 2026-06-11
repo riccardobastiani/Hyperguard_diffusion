@@ -1,0 +1,7 @@
+Multi-step OR Euclidean results
+steps: 1/layer26, 5/layer23, 10/layer23, 15/layer22, 20/layer22, 25/layer22, 30/layer22
+q=0.90 | unsafe blocked=44/50 (88.0%) | safe blocked=9/50 (18.0%) | ASR post=12.0% | AUROC_margin=0.9112 | AUPR_margin=0.8715
+q=0.95 | unsafe blocked=42/50 (84.0%) | safe blocked=4/50 (8.0%) | ASR post=16.0% | AUROC_margin=0.9068 | AUPR_margin=0.8700
+q=0.98 | unsafe blocked=39/50 (78.0%) | safe blocked=2/50 (4.0%) | ASR post=22.0% | AUROC_margin=0.9024 | AUPR_margin=0.8669
+q=0.99 | unsafe blocked=36/50 (72.0%) | safe blocked=2/50 (4.0%) | ASR post=28.0% | AUROC_margin=0.9072 | AUPR_margin=0.9015
+Wrote artifacts to logs/exp_02_multistep_or_rule
