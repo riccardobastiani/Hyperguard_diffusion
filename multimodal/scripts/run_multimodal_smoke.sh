@@ -3,8 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv}"
-GPO_V_ROOT="${1:-${GPO_V_ROOT:-}}"
-UNSAFE_FILE="${2:-${UNSAFE_FILE:-}}"
+ARG1="${1:-}"
+ARG2="${2:-}"
+GPO_V_ROOT="${GPO_V_ROOT:-}"
+UNSAFE_FILE="${UNSAFE_FILE:-}"
 UNSAFE_FIELD="${UNSAFE_FIELD:-}"
 IMAGE_PATH="${IMAGE_PATH:-gpo_v/assets/example_input_image.jpg}"
 DATASET_PATH="${DATASET_PATH:-data/multimodal_gpo/smoke.jsonl}"
@@ -20,26 +22,42 @@ cd "$ROOT_DIR"
 if [[ -f "$ROOT_DIR/.env.multimodal" ]]; then
   # shellcheck disable=SC1091
   source "$ROOT_DIR/.env.multimodal"
-  GPO_V_ROOT="${1:-${GPO_V_ROOT:-}}"
 fi
 
-if [[ "$VENV_DIR" == "$ROOT_DIR/.venv" && ! -f "$VENV_DIR/bin/activate" && -f "$ROOT_DIR/venv/bin/activate" ]]; then
+if [[ -n "$ARG2" ]]; then
+  GPO_V_ROOT="$ARG1"
+  UNSAFE_FILE="$ARG2"
+elif [[ -n "$ARG1" ]]; then
+  if [[ -n "$GPO_V_ROOT" && -f "$GPO_V_ROOT/llava/model/builder.py" ]]; then
+    UNSAFE_FILE="$ARG1"
+  else
+    GPO_V_ROOT="$ARG1"
+  fi
+fi
+
+if [[ "$VENV_DIR" == "$ROOT_DIR/.venv" && ! -f "$VENV_DIR/bin/activate" && ! -f "$VENV_DIR/Scripts/activate" && -f "$ROOT_DIR/venv/bin/activate" ]]; then
   VENV_DIR="$ROOT_DIR/venv"
 fi
 
 if [[ -z "$GPO_V_ROOT" || ! -f "$GPO_V_ROOT/llava/model/builder.py" ]]; then
-  echo "Usage: bash scripts/run_multimodal_smoke.sh /path/to/GPO-V/LLaDA-V/train [unsafe_prompts.csv]" >&2
+  echo "Usage: bash scripts/run_multimodal_smoke.sh [/path/to/GPO-V/LLaDA-V] [unsafe_prompts.csv]" >&2
+  echo "After running scripts/download_gpo_v_upstream.sh, you may pass only unsafe_prompts.csv." >&2
   echo "GPO_V_ROOT must point to the upstream LLaDA-V train folder containing llava/model/builder.py." >&2
   exit 1
 fi
 
-if [[ ! -f "$VENV_DIR/bin/activate" ]]; then
+if [[ ! -f "$VENV_DIR/bin/activate" && ! -f "$VENV_DIR/Scripts/activate" ]]; then
   echo "Missing virtualenv at $VENV_DIR. Run scripts/setup_ssh_env.sh first." >&2
   exit 1
 fi
 
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+if [[ -f "$VENV_DIR/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/bin/activate"
+else
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/Scripts/activate"
+fi
 
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 

@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         help="Checkpoint every N processed samples (0 disables periodic checkpoints).",
     )
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint files in output-dir.")
+    parser.add_argument(
+        "--write-final-checkpoint",
+        action="store_true",
+        help="Also write checkpoint_probes.npz, checkpoint_metadata.json, and checkpoint_state.json after a complete run.",
+    )
     return parser.parse_args()
 
 
@@ -219,6 +224,14 @@ def main() -> None:
         arrays = _flatten_feature_buffers(feature_buffers, labels)
         _atomic_write_npz(args.output_dir / "probes.npz", arrays)
         _atomic_write_json(args.output_dir / "metadata.json", metadata)
+        if args.write_final_checkpoint:
+            checkpoint_state = {
+                "processed_count": len(labels),
+                "probe_steps": list(args.probe_steps),
+                "layer_ids": list(args.layer_ids),
+                "complete": True,
+            }
+            _save_checkpoint(args.output_dir, feature_buffers, labels, metadata, checkpoint_state)
         LOGGER.info("Saved probes to %s", args.output_dir / "probes.npz")
         return
 
@@ -314,8 +327,17 @@ def main() -> None:
     _atomic_write_json(args.output_dir / "metadata.json", metadata)
 
     checkpoint_paths = _checkpoint_paths(args.output_dir)
-    for p in checkpoint_paths.values():
-        p.unlink(missing_ok=True)
+    if args.write_final_checkpoint:
+        checkpoint_state = {
+            "processed_count": len(labels),
+            "probe_steps": list(args.probe_steps),
+            "layer_ids": list(args.layer_ids),
+            "complete": True,
+        }
+        _save_checkpoint(args.output_dir, feature_buffers, labels, metadata, checkpoint_state)
+    else:
+        for p in checkpoint_paths.values():
+            p.unlink(missing_ok=True)
 
     LOGGER.info("Saved probes to %s", args.output_dir / "probes.npz")
 

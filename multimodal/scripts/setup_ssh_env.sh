@@ -23,8 +23,16 @@ if [[ -n "$GPO_V_ROOT" ]]; then
 fi
 
 "$PYTHON_BIN" -m venv "$VENV_DIR"
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+if [[ -f "$VENV_DIR/bin/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/bin/activate"
+elif [[ -f "$VENV_DIR/Scripts/activate" ]]; then
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/Scripts/activate"
+else
+  echo "Virtualenv was created, but no activate script was found under $VENV_DIR." >&2
+  exit 1
+fi
 
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
