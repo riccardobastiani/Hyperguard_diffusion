@@ -30,7 +30,7 @@ experiment logs, while this README acts as the single entry point.
 | `dija_dataset/` | DIJA attack/dataset code and benchmark evaluation pipeline. |
 | `euclidean/` | Euclidean safety-trajectory baselines and experiment summaries. |
 | `layer_analysis/` | Conceptual HyperGuard/layer-probing notes. |
-| `mutimodal/` | Multimodal GPO-V HyperGuard experiments for LLaDA-V. |
+| `multimodal/` | Multimodal GPO-V HyperGuard experiments for LLaDA-V. |
 
 ## Core Idea
 
@@ -551,15 +551,21 @@ extract hidden state
 In the active root implementation, the stop/flag decision is evaluated offline
 by `test_guard.py`; early interruption inside `generate.py` is not implemented.
 
-## Multimodal GPO-V HyperGuard (`mutimodal/`)
+## Multimodal GPO-V HyperGuard (`multimodal/`)
 
-The `mutimodal/` folder evaluates whether HyperGuard-style hyperbolic SVDD can
+The `multimodal/` folder evaluates whether HyperGuard-style hyperbolic SVDD can
 detect unsafe multimodal trajectories produced by GPO-V attacks on LLaDA-V.
 
 The v1 target is:
 
 ```text
 GSAI-ML/LLaDA-V
+```
+
+Model weights are available at:
+
+```text
+https://huggingface.co/GSAI-ML/LLaDA-V
 ```
 
 The dataset builder creates the split needed for the experiment:
@@ -573,43 +579,51 @@ the image clean.
 
 ### Multimodal Setup
 
-Install dependencies:
-
-```powershell
-pip install -r requirements.txt
-```
-
-On a Linux SSH/GPU machine:
+On a Linux SSH/GPU machine, start from the multimodal folder:
 
 ```bash
-bash scripts/setup_ssh_env.sh /path/to/GPO-V/LLaDA-V
+cd multimodal
+bash scripts/download_gpo_v_upstream.sh
+bash scripts/setup_ssh_env.sh external/GPO-V-0250/LLaDA-V
+```
+
+The downloader fetches the upstream anonymous GPO-V repo, places LLaDA-V code at
+`external/GPO-V-0250/LLaDA-V`, verifies
+`external/GPO-V-0250/LLaDA-V/llava/model/builder.py`, and writes
+`.env.multimodal` so the run scripts can find GPO-V automatically.
+
+If you want the model weights cached before running:
+
+```bash
+hf download GSAI-ML/LLaDA-V
 ```
 
 Run a tiny activation-extraction smoke test:
 
 ```bash
-bash scripts/run_multimodal_smoke.sh /path/to/GPO-V/LLaDA-V
+bash scripts/run_multimodal_smoke.sh
 ```
 
 With a local harmful prompt file:
 
 ```bash
-bash scripts/run_multimodal_smoke.sh /path/to/GPO-V/LLaDA-V data/advbench.csv
+bash scripts/run_multimodal_smoke.sh data/advbench.csv
 ```
 
 To include a tiny GPO-V perturbation test:
 
 ```bash
 RUN_ATTACK_SMOKE=1 ATTACK_STEPS=5 \
-bash scripts/run_multimodal_smoke.sh /path/to/GPO-V/LLaDA-V data/advbench.csv
+bash scripts/run_multimodal_smoke.sh data/advbench.csv
 ```
 
 ### Required External Pieces
 
-- Upstream GPO-V `LLaDA-V` code folder, passed with `--gpo-v-root`.
+- Upstream GPO-V `LLaDA-V` code, obtainable with
+  `scripts/download_gpo_v_upstream.sh`.
 - Access to `GSAI-ML/LLaDA-V` weights through Hugging Face or a model cache.
 - A harmful prompt file for true AdvBench/JailbreakBench unsafe prompts.
-- Optional XSTest-safe/Alpaca safe prompt file.
+- Optional Alpaca-style safe prompt file.
 - CUDA GPU with enough VRAM for LLaDA-V and GPO-V optimization.
 
 The repository already contains HyperGuard/SVDD code and a benign demo image at:
@@ -618,40 +632,78 @@ The repository already contains HyperGuard/SVDD code and a benign demo image at:
 gpo_v/assets/example_input_image.jpg
 ```
 
+Recommended prompt sources:
+
+```text
+Unsafe: https://huggingface.co/datasets/walledai/AdvBench
+Safe:   https://huggingface.co/datasets/iboero16/SAFE-ALPACA
+```
+
+Export local prompt files on the GPU machine:
+
+```bash
+mkdir -p data/hf_prompts
+python - <<'PY'
+from datasets import load_dataset
+
+advbench = load_dataset("walledai/AdvBench", split="train")
+advbench.to_csv("data/hf_prompts/advbench.csv", index=False)
+
+safe_alpaca = load_dataset("iboero16/SAFE-ALPACA", split="safe_alpaca_100")
+safe_alpaca.to_json("data/hf_prompts/safe_alpaca.jsonl", orient="records", lines=True)
+PY
+```
+
 ### Prepare Multimodal Data
 
 Preferred setup with a local harmful prompt file:
 
-```powershell
-python prepare_multimodal_gpo_dataset.py `
-  --unsafe-file data/advbench.csv `
-  --unsafe-field goal `
-  --unsafe-source-name advbench `
-  --max-safe 50 `
-  --max-unsafe 50 `
-  --image-path gpo_v/assets/example_input_image.jpg `
+```bash
+python prepare_multimodal_gpo_dataset.py \
+  --unsafe-file data/hf_prompts/advbench.csv \
+  --safe-file data/hf_prompts/safe_alpaca.jsonl \
+  --safe-field instruction \
+  --unsafe-source-name advbench \
+  --max-safe 200 \
+  --max-unsafe 200 \
+  --image-path gpo_v/assets/example_input_image.jpg \
   --output data/multimodal_gpo/llada_v_gpo_prompts.jsonl
 ```
 
 ### Run GPO-V and Extract Probes
 
-For a test, use `--max-samples 2 --skip-attack`. For the real unsafe
-trajectory run, omit `--skip-attack`.
+For the full 400-sample attacked probe extraction run, use the helper:
 
-```powershell
-python run_gpo_v_lladav_probe.py `
-  --gpo-v-root C:\path\to\GPO-V\LLaDA-V `
-  --input-jsonl data/multimodal_gpo/llada_v_gpo_prompts.jsonl `
-  --output-dir outputs/multimodal_gpo/probes `
-  --probe-steps 5 10 15 `
-  --layer-ids 16 23 29
+```bash
+SAFE_FILE=data/hf_prompts/safe_alpaca.jsonl \
+SAFE_FIELD=instruction \
+bash run_full_multimodal_probe_attack.sh data/hf_prompts/advbench.csv
 ```
 
 This saves:
 
 ```text
-outputs/multimodal_gpo/probes/probes.npz
-outputs/multimodal_gpo/probes/metadata.json
+probes_400_attack_all_layers_steps_1_5_10_15/probes.npz
+probes_400_attack_all_layers_steps_1_5_10_15/metadata.json
+probes_400_attack_all_layers_steps_1_5_10_15/checkpoint_probes.npz
+probes_400_attack_all_layers_steps_1_5_10_15/checkpoint_metadata.json
+probes_400_attack_all_layers_steps_1_5_10_15/checkpoint_state.json
+results/multimodal_gpo_full_attack/verification_summary.json
+```
+
+For custom extraction from an already prepared JSONL file:
+
+```bash
+python run_gpo_v_lladav_probe.py \
+  --gpo-v-root external/GPO-V-0250/LLaDA-V \
+  --input-jsonl data/multimodal_gpo/llada_v_gpo_prompts.jsonl \
+  --output-dir outputs/multimodal_gpo/probes \
+  --probe-steps 1 5 10 15 \
+  --all-layers \
+  --attack-steps 5 \
+  --save-every 25 \
+  --resume \
+  --write-final-checkpoint
 ```
 
 ### Train Multimodal SVDD
